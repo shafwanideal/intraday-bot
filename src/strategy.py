@@ -91,7 +91,7 @@ class GridEngine:
         apply_costs: bool = True,
         leverage: float = LEVERAGE,
         daily_loss_cap: float = DAILY_LOSS_CAP,
-        trail_stop: bool = False,
+        trail_stop: bool = True,
         trail_pct: float | None = None,
     ):
         self.grid_pct = grid_pct

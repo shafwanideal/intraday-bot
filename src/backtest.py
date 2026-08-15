@@ -15,7 +15,7 @@ def run_backtest(
     leverage: float = LEVERAGE,
     daily_plan: dict | None = None,
     daily_loss_cap: float = DAILY_LOSS_CAP,
-    trail_stop: bool = False,
+    trail_stop: bool = True,
     trail_pct: float | None = None,
 ) -> dict:
     """Simulate the grid strategy (see `src.strategy.GridEngine`) against real
