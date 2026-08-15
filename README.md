@@ -3,8 +3,8 @@
 Grid-averaging intraday strategy for Indian equities via Zerodha Kite Connect.
 See the project brief for strategy rules and build status.
 
-**Status**: step 1 of implementation — Kite Connect authentication only.
-Nothing here places real orders yet.
+**Status**: auth, a real historical backtest, and shadow (paper) trading
+against live Kite data are working. Nothing here places real orders yet.
 
 ## Setup
 
@@ -33,3 +33,35 @@ just the `request_token` from it) after logging in, then exchanges it for an
 access token and caches it in `.kite_session.json` (gitignored) for the rest
 of the day. Other modules should call `src.auth.get_kite()` to get an
 authenticated client — it reuses the cached token if still valid for today.
+
+## Backtest
+
+```bash
+python3 scripts/run_backtest.py             # generic sample-symbol backtest
+python3 scripts/run_daily_plan_backtest.py   # backtest specific (date, symbol) picks you actually made
+```
+
+Uses free Yahoo Finance 5-min intraday data (last ~60 days only) via
+`src/data.py`, and `src/strategy.py`'s `GridEngine` for the actual grid
+logic (2% averaging/exit by default, 5x leverage, real Zerodha intraday
+costs, mark-to-market daily loss cap). Edit `DAILY_PLAN` in
+`scripts/run_daily_plan_backtest.py` to test your own dated picks.
+
+## Shadow mode (paper trading against live data)
+
+Each morning, once you have today's picks (max 3, since that's the
+strategy's concurrent-position cap):
+
+```bash
+cp todays_stocks.example.json todays_stocks.json   # first time only
+# edit todays_stocks.json with today's symbols + "long"/"short"
+python3 -m src.auth                                 # re-authenticate (daily)
+python3 scripts/run_shadow.py
+```
+
+This polls live Kite quotes every 15s during market hours and runs the same
+`GridEngine` logic as the backtest, logging every decision (entry,
+averaging, target exit, daily loss cap, square-off) to
+`logs/shadow_YYYY-MM-DD.jsonl` and the console. **It never calls any
+order-placement endpoint — nothing real trades.** `todays_stocks.json` is
+gitignored since it changes every day.

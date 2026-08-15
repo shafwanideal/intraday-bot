@@ -7,3 +7,4 @@ venv/
 *.log
 logs/
 .claude/
+todays_stocks.json
