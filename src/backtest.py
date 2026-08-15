@@ -1,9 +1,9 @@
 import pandas as pd
 
-from src.strategy import GRID_PCT, LEVERAGE, MARGIN_CAPITAL, SQUARE_OFF_TIME, GridEngine
+from src.strategy import DAILY_LOSS_CAP, GRID_PCT, LEVERAGE, MARGIN_CAPITAL, SQUARE_OFF_TIME, GridEngine
 
 # Re-exported for callers/tests that reach for these on this module.
-__all__ = ["run_backtest", "summarize", "per_symbol_comparison", "GRID_PCT", "LEVERAGE", "MARGIN_CAPITAL"]
+__all__ = ["run_backtest", "summarize", "per_symbol_comparison", "GRID_PCT", "LEVERAGE", "MARGIN_CAPITAL", "DAILY_LOSS_CAP"]
 
 
 def run_backtest(
@@ -14,6 +14,9 @@ def run_backtest(
     apply_costs: bool = True,
     leverage: float = LEVERAGE,
     daily_plan: dict | None = None,
+    daily_loss_cap: float = DAILY_LOSS_CAP,
+    trail_stop: bool = False,
+    trail_pct: float | None = None,
 ) -> dict:
     """Simulate the grid strategy (see `src.strategy.GridEngine`) against real
     intraday bars, bar by bar.
@@ -26,6 +29,11 @@ def run_backtest(
     simulated, and on each of those dates only that date's symbols are
     eligible to trade -- this mirrors the real workflow of a fresh, possibly
     different, stock list handed to the bot each morning.
+
+    If `trail_stop` is True, hitting `grid_pct` favorable move doesn't close
+    the position immediately -- instead it starts trailing a stop `trail_pct`
+    behind the best price seen since (default: half of `grid_pct`, so at
+    least half the original target is locked in even on an immediate reversal).
     """
     directions = directions or {}
 
@@ -52,7 +60,14 @@ def run_backtest(
             continue
 
         all_times = sorted({ts for df in day_bars.values() for ts in df.index})
-        engine = GridEngine(grid_pct=grid_pct, apply_costs=apply_costs, leverage=leverage)
+        engine = GridEngine(
+            grid_pct=grid_pct,
+            apply_costs=apply_costs,
+            leverage=leverage,
+            daily_loss_cap=daily_loss_cap,
+            trail_stop=trail_stop,
+            trail_pct=trail_pct,
+        )
 
         for i, t in enumerate(all_times):
             is_first_bar = i == 0
@@ -86,6 +101,18 @@ def run_backtest(
                     for sym, pos in engine.open_positions.items()
                 }
                 engine.square_off(current_prices, t)
+
+        if engine.open_positions:
+            # Safety net: no bar in this day's unified timeline reached SQUARE_OFF_TIME
+            # (e.g. a symbol's feed ends a few minutes early) so the in-loop square-off
+            # never fired. Force-close using each symbol's last known price rather than
+            # silently leaving positions open and dropping their P&L.
+            last_t = all_times[-1]
+            current_prices = {
+                sym: day_bars[sym].loc[last_t, "Close"] if sym in day_bars and last_t in day_bars[sym].index else pos.avg_price
+                for sym, pos in engine.open_positions.items()
+            }
+            engine.square_off(current_prices, last_t)
 
         for entry in engine.trade_log:
             trade_log.append({"date": day, **entry})

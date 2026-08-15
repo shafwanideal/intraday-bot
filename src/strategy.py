@@ -7,7 +7,7 @@ MARGIN_PER_UNIT = MARGIN_CAPITAL / TOTAL_UNITS  # 12,500
 LEVERAGE = 5  # Zerodha MIS intraday leverage on equity; varies per stock in reality
 MAX_CONCURRENT_POSITIONS = 3
 GRID_PCT = 0.02
-DAILY_LOSS_CAP = 5_000
+DAILY_LOSS_CAP = 10_000  # raised from Rs 5,000 -- see grid_pct_and_costs memory for the tradeoff
 SQUARE_OFF_TIME = time(15, 15)
 
 # Zerodha intraday equity (non-delivery) charges, applied per order.
@@ -46,6 +46,8 @@ class Position:
     entry_time: object
     legs: list = field(default_factory=list)  # list of (price, qty)
     averaged: bool = False
+    trailing: bool = False
+    peak_price: float | None = None  # best favorable price seen once trailing has started
 
     @property
     def qty(self) -> float:
@@ -88,10 +90,16 @@ class GridEngine:
         grid_pct: float = GRID_PCT,
         apply_costs: bool = True,
         leverage: float = LEVERAGE,
+        daily_loss_cap: float = DAILY_LOSS_CAP,
+        trail_stop: bool = False,
+        trail_pct: float | None = None,
     ):
         self.grid_pct = grid_pct
         self.apply_costs = apply_costs
         self.exposure_per_unit = MARGIN_PER_UNIT * leverage
+        self.daily_loss_cap = daily_loss_cap
+        self.trail_stop = trail_stop
+        self.trail_pct = trail_pct if trail_pct is not None else grid_pct / 2
         self.capital_units_available = TOTAL_UNITS
         self.open_positions: dict[str, Position] = {}
         self.daily_pnl = 0.0
@@ -139,13 +147,30 @@ class GridEngine:
         return entry
 
     def update(self, symbol: str, price: float, timestamp) -> dict | None:
-        """Check target-exit / averaging for one open position at the current price."""
+        """Check target-exit / trailing-stop / averaging for one open position
+        at the current price."""
         if self.halted or symbol not in self.open_positions:
             return None
         pos = self.open_positions[symbol]
+
+        if pos.trailing:
+            if pos.direction == "long":
+                pos.peak_price = max(pos.peak_price, price)
+                pullback = (pos.peak_price - price) / pos.peak_price
+            else:
+                pos.peak_price = min(pos.peak_price, price)
+                pullback = (price - pos.peak_price) / pos.peak_price
+            if pullback >= self.trail_pct:
+                return self._close(symbol, price, "trailing_stop_exit", timestamp)
+            return None
+
         move = move_pct(pos.direction, pos.avg_price, price)
 
         if move >= self.grid_pct:
+            if self.trail_stop:
+                pos.trailing = True
+                pos.peak_price = price
+                return None
             return self._close(symbol, price, "target_exit", timestamp)
 
         if not pos.averaged and move <= -self.grid_pct and self.capital_units_available >= 1:
@@ -165,7 +190,7 @@ class GridEngine:
             pnl(pos.direction, pos.avg_price, current_prices.get(sym, pos.avg_price), pos.qty)
             for sym, pos in self.open_positions.items()
         )
-        if self.daily_pnl + unrealized <= -DAILY_LOSS_CAP:
+        if self.daily_pnl + unrealized <= -self.daily_loss_cap:
             self.halted = True
             return [
                 self._close(sym, current_prices.get(sym, self.open_positions[sym].avg_price), "daily_loss_cap", timestamp)
