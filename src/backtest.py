@@ -11,6 +11,34 @@ GRID_PCT = 0.02
 DAILY_LOSS_CAP = 5_000
 SQUARE_OFF_TIME = time(15, 15)
 
+# Zerodha intraday equity (non-delivery) charges, applied per order.
+BROKERAGE_RATE = 0.0003  # 0.03%, capped at Rs 20/order
+BROKERAGE_CAP = 20.0
+STT_RATE = 0.00025  # 0.025%, sell side only
+EXCHANGE_TXN_RATE = 0.0000297  # NSE, both sides
+SEBI_RATE = 0.000001  # both sides
+STAMP_DUTY_RATE = 0.00003  # 0.003%, buy side only
+GST_RATE = 0.18  # on brokerage + exchange txn charges
+
+
+def order_cost(value: float, side: str) -> float:
+    """Real round-number Zerodha intraday equity charges for one order leg."""
+    brokerage = min(BROKERAGE_CAP, BROKERAGE_RATE * value)
+    exchange_txn = EXCHANGE_TXN_RATE * value
+    sebi = SEBI_RATE * value
+    gst = GST_RATE * (brokerage + exchange_txn)
+    stt = STT_RATE * value if side == "sell" else 0.0
+    stamp = STAMP_DUTY_RATE * value if side == "buy" else 0.0
+    return brokerage + exchange_txn + sebi + gst + stt + stamp
+
+
+def position_cost(direction: str, legs: list[tuple[float, float]], exit_price: float, exit_qty: float) -> float:
+    entry_side = "buy" if direction == "long" else "sell"
+    exit_side = "sell" if direction == "long" else "buy"
+    total = sum(order_cost(price * qty, entry_side) for price, qty in legs)
+    total += order_cost(exit_price * exit_qty, exit_side)
+    return total
+
 
 @dataclass
 class Position:
@@ -49,17 +77,22 @@ def run_backtest(
     data: dict[str, pd.DataFrame],
     symbols: list[str],
     directions: dict[str, str] | None = None,
+    grid_pct: float = GRID_PCT,
+    apply_costs: bool = True,
 ) -> dict:
     """Simulate the grid strategy against real intraday bars.
 
     Rules implemented (see project brief): 1 unit (of 4, ~Rs 12,500 each) at
-    entry; one averaging leg on a 2% adverse move; full exit on a 2%
-    favorable move from average cost; max 3 concurrent positions sharing the
-    4-unit capital pool; daily loss cap of Rs 5,000 halts and flattens
-    everything for the day; hard square-off of anything still open at 15:15.
+    entry; one averaging leg on a `grid_pct` adverse move; full exit on a
+    `grid_pct` favorable move from average cost; max 3 concurrent positions
+    sharing the 4-unit capital pool; daily loss cap of Rs 5,000 (net of
+    costs) halts and flattens everything for the day; hard square-off of
+    anything still open at 15:15.
 
     Entries only happen on the first bar of each day (market open), long by
-    default unless `directions[symbol] == "short"`.
+    default unless `directions[symbol] == "short"`. When `apply_costs` is
+    True, real Zerodha intraday brokerage/STT/exchange/stamp/GST charges are
+    deducted from each closed position's P&L.
     """
     directions = directions or {}
     all_days = sorted({ts.date() for sym in symbols if sym in data for ts in data[sym].index})
@@ -85,7 +118,9 @@ def run_backtest(
 
         def close(symbol: str, pos: Position, exit_price: float, reason: str, t: pd.Timestamp) -> None:
             nonlocal daily_pnl, capital_units_available
-            pnl = _pnl(pos.direction, pos.avg_price, exit_price, pos.qty)
+            gross_pnl = _pnl(pos.direction, pos.avg_price, exit_price, pos.qty)
+            costs = position_cost(pos.direction, pos.legs, exit_price, pos.qty) if apply_costs else 0.0
+            pnl = gross_pnl - costs
             daily_pnl += pnl
             capital_units_available += pos.units_used
             trade_log.append(
@@ -99,6 +134,8 @@ def run_backtest(
                     "exit_price": exit_price,
                     "qty": pos.qty,
                     "units_used": pos.units_used,
+                    "gross_pnl": gross_pnl,
+                    "costs": costs,
                     "pnl": pnl,
                     "reason": reason,
                 }
@@ -134,12 +171,12 @@ def run_backtest(
                 price = day_bars[symbol].loc[t, "Close"]
                 move = _move_pct(pos.direction, pos.avg_price, price)
 
-                if move >= GRID_PCT:
+                if move >= grid_pct:
                     close(symbol, pos, price, "target_exit", t)
                     del open_positions[symbol]
                     continue
 
-                if not pos.averaged and move <= -GRID_PCT and capital_units_available >= 1:
+                if not pos.averaged and move <= -grid_pct and capital_units_available >= 1:
                     qty = UNIT_SIZE / price
                     pos.legs.append((price, qty))
                     pos.averaged = True
@@ -179,8 +216,11 @@ def summarize(results: dict) -> str:
     cap_hit_days = daily["halted_on_loss_cap"].sum()
 
     lines.append(f"Days simulated: {len(daily)}")
-    lines.append(f"Total P&L: Rs {total_pnl:,.2f}")
-    lines.append(f"Avg P&L/day: Rs {daily['pnl'].mean():,.2f}")
+    if not trades.empty and "costs" in trades:
+        lines.append(f"Total gross P&L: Rs {trades['gross_pnl'].sum():,.2f}")
+        lines.append(f"Total transaction costs: Rs {trades['costs'].sum():,.2f}")
+    lines.append(f"Total net P&L: Rs {total_pnl:,.2f}")
+    lines.append(f"Avg net P&L/day: Rs {daily['pnl'].mean():,.2f}")
     lines.append(f"Win days: {win_days}  Loss days: {loss_days}")
     lines.append(f"Days daily loss cap was hit: {cap_hit_days}")
     lines.append(f"Best day: Rs {daily['pnl'].max():,.2f}  Worst day: Rs {daily['pnl'].min():,.2f}")
@@ -200,6 +240,8 @@ def per_symbol_comparison(
     data: dict[str, pd.DataFrame],
     symbols: list[str],
     directions: dict[str, str] | None = None,
+    grid_pct: float = GRID_PCT,
+    apply_costs: bool = True,
 ) -> pd.DataFrame:
     """Run each symbol through its own isolated backtest (full capital, no
     competition for the 3-slot/4-unit pool). Useful for comparing candidates
@@ -210,7 +252,9 @@ def per_symbol_comparison(
     for symbol in symbols:
         if symbol not in data:
             continue
-        result = run_backtest({symbol: data[symbol]}, symbols=[symbol], directions=directions)
+        result = run_backtest(
+            {symbol: data[symbol]}, symbols=[symbol], directions=directions, grid_pct=grid_pct, apply_costs=apply_costs
+        )
         daily = pd.DataFrame(result["daily_results"])
         trades = pd.DataFrame(result["trade_log"])
         if daily.empty:
@@ -219,8 +263,10 @@ def per_symbol_comparison(
             {
                 "symbol": symbol,
                 "days": len(daily),
-                "total_pnl": round(daily["pnl"].sum(), 2),
-                "avg_pnl_day": round(daily["pnl"].mean(), 2),
+                "gross_pnl": round(trades["gross_pnl"].sum(), 2) if not trades.empty else 0,
+                "costs": round(trades["costs"].sum(), 2) if not trades.empty else 0,
+                "net_pnl": round(daily["pnl"].sum(), 2),
+                "avg_net_pnl_day": round(daily["pnl"].mean(), 2),
                 "win_days": int((daily["pnl"] > 0).sum()),
                 "loss_days": int((daily["pnl"] < 0).sum()),
                 "trades": len(trades),
