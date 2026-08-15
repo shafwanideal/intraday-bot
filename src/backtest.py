@@ -76,11 +76,12 @@ def _move_pct(direction: str, avg_price: float, price: float) -> float:
 
 def run_backtest(
     data: dict[str, pd.DataFrame],
-    symbols: list[str],
+    symbols: list[str] | None = None,
     directions: dict[str, str] | None = None,
     grid_pct: float = GRID_PCT,
     apply_costs: bool = True,
     leverage: float = LEVERAGE,
+    daily_plan: dict | None = None,
 ) -> dict:
     """Simulate the grid strategy against real intraday bars.
 
@@ -101,21 +102,36 @@ def run_backtest(
     default unless `directions[symbol] == "short"`. When `apply_costs` is
     True, real Zerodha intraday brokerage/STT/exchange/stamp/GST charges are
     deducted from each closed position's P&L.
+
+    If `daily_plan` is given (`{date: {symbol: direction}}`), it overrides
+    `symbols`/`directions` entirely: only the dates present in the plan are
+    simulated, and on each of those dates only that date's symbols are
+    eligible to trade -- this mirrors the real workflow of a fresh, possibly
+    different, stock list handed to the bot each morning.
     """
     directions = directions or {}
     exposure_per_unit = MARGIN_PER_UNIT * leverage
-    all_days = sorted({ts.date() for sym in symbols if sym in data for ts in data[sym].index})
+
+    if daily_plan is not None:
+        all_days = sorted(daily_plan.keys())
+    else:
+        symbols = symbols or []
+        all_days = sorted({ts.date() for sym in symbols if sym in data for ts in data[sym].index})
 
     trade_log: list[dict] = []
     daily_results: list[dict] = []
 
     for day in all_days:
+        day_symbols = list(daily_plan[day].keys()) if daily_plan is not None else symbols
+        day_directions = daily_plan[day] if daily_plan is not None else directions
+
         day_bars = {
             sym: data[sym][data[sym].index.date == day]
-            for sym in symbols
+            for sym in day_symbols
             if sym in data and not data[sym][data[sym].index.date == day].empty
         }
         if not day_bars:
+            daily_results.append({"date": day, "pnl": 0.0, "halted_on_loss_cap": False, "note": "no data for this day's symbol(s)"})
             continue
 
         all_times = sorted({ts for df in day_bars.values() for ts in df.index})
@@ -155,7 +171,7 @@ def run_backtest(
             is_square_off = t.time() >= SQUARE_OFF_TIME
 
             if is_first_bar and not halted:
-                for symbol in symbols:
+                for symbol in day_symbols:
                     if symbol not in day_bars or t not in day_bars[symbol].index:
                         continue
                     if symbol in open_positions:
@@ -163,7 +179,7 @@ def run_backtest(
                     if len(open_positions) >= MAX_CONCURRENT_POSITIONS or capital_units_available < 1:
                         break
                     price = day_bars[symbol].loc[t, "Open"]
-                    direction = directions.get(symbol, "long")
+                    direction = day_directions.get(symbol, "long")
                     qty = exposure_per_unit / price
                     open_positions[symbol] = Position(
                         symbol=symbol, direction=direction, entry_time=t, legs=[(price, qty)]
