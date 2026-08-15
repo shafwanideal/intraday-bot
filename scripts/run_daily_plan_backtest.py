@@ -49,7 +49,12 @@ def main() -> None:
     if missing:
         print(f"WARNING: no data for {missing}")
 
-    results = backtest.run_backtest(bars, daily_plan=DAILY_PLAN, grid_pct=GRID_PCT)
+    print("Fetching ATR (14d) for volatility-scaled trailing stop ...")
+    symbol_atr = kite_data.fetch_symbol_atr(ALL_SYMBOLS)
+
+    results = backtest.run_backtest(
+        bars, daily_plan=DAILY_PLAN, grid_pct=GRID_PCT, symbol_atr=symbol_atr, atr_multiplier=backtest.DEFAULT_ATR_MULTIPLIER
+    )
 
     print(f"\n{'=' * 70}\nDaily-plan backtest: {len(DAILY_PLAN)} trading days, grid={GRID_PCT:.0%}, leverage={backtest.LEVERAGE}x\n{'=' * 70}\n")
 

@@ -106,3 +106,19 @@ def fetch_daily(symbol: str, days: int = 45) -> pd.DataFrame:
     df["datetime"] = pd.to_datetime(df["datetime"])
     df = df.set_index("datetime").sort_index()
     return df[["Open", "High", "Low", "Close", "Volume"]]
+
+
+def fetch_symbol_atr(symbols: list[str]) -> dict[str, float]:
+    """14-day ATR per symbol, for volatility-scaled trailing stops. Skips (with
+    a warning) any symbol whose ATR can't be computed."""
+    from .indicators import atr as compute_atr
+
+    result = {}
+    for symbol in symbols:
+        daily = fetch_daily(symbol)
+        value = compute_atr(daily) if not daily.empty else None
+        if value is not None:
+            result[symbol] = value
+        else:
+            print(f"WARNING: could not compute ATR for {symbol}, it will use the fixed percentage trail instead")
+    return result

@@ -6,25 +6,11 @@ from pathlib import Path
 from kiteconnect.exceptions import KiteException
 
 from . import auth, kite_data
-from .indicators import atr as compute_atr
-from .strategy import SQUARE_OFF_TIME, GridEngine
+from .strategy import DEFAULT_ATR_MULTIPLIER, SQUARE_OFF_TIME, GridEngine
 
 MARKET_OPEN = time(9, 15)
 MARKET_CLOSE = time(15, 30)
 POLL_INTERVAL_SECONDS = 15
-ATR_MULTIPLIER = 0.5  # trail distance = ATR_MULTIPLIER * symbol's 14-day ATR
-
-
-def _fetch_symbol_atr(symbols: list[str]) -> dict[str, float]:
-    result = {}
-    for symbol in symbols:
-        daily = kite_data.fetch_daily(symbol)
-        value = compute_atr(daily) if not daily.empty else None
-        if value is not None:
-            result[symbol] = value
-        else:
-            print(f"WARNING: could not compute ATR for {symbol}, will use the fixed percentage trail for it")
-    return result
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 TODAYS_STOCKS_FILE = PROJECT_ROOT / "todays_stocks.json"
@@ -73,8 +59,8 @@ def run_shadow(poll_interval: int = POLL_INTERVAL_SECONDS) -> None:
 
     today = date.today()
     logger = ShadowLogger(LOG_DIR / f"shadow_{today.isoformat()}.jsonl")
-    symbol_atr = _fetch_symbol_atr(list(plan.keys()))
-    engine = GridEngine(atr_multiplier=ATR_MULTIPLIER)
+    symbol_atr = kite_data.fetch_symbol_atr(list(plan.keys()))
+    engine = GridEngine(atr_multiplier=DEFAULT_ATR_MULTIPLIER)
     instruments = [f"NSE:{sym}" for sym in plan]
     entered_today: set[str] = set()
 

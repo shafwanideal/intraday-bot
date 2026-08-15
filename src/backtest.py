@@ -1,9 +1,18 @@
 import pandas as pd
 
-from src.strategy import DAILY_LOSS_CAP, GRID_PCT, LEVERAGE, MARGIN_CAPITAL, SQUARE_OFF_TIME, GridEngine
+from src.strategy import DAILY_LOSS_CAP, DEFAULT_ATR_MULTIPLIER, GRID_PCT, LEVERAGE, MARGIN_CAPITAL, SQUARE_OFF_TIME, GridEngine
 
 # Re-exported for callers/tests that reach for these on this module.
-__all__ = ["run_backtest", "summarize", "per_symbol_comparison", "GRID_PCT", "LEVERAGE", "MARGIN_CAPITAL", "DAILY_LOSS_CAP"]
+__all__ = [
+    "run_backtest",
+    "summarize",
+    "per_symbol_comparison",
+    "GRID_PCT",
+    "LEVERAGE",
+    "MARGIN_CAPITAL",
+    "DAILY_LOSS_CAP",
+    "DEFAULT_ATR_MULTIPLIER",
+]
 
 
 def run_backtest(
@@ -181,12 +190,18 @@ def per_symbol_comparison(
     grid_pct: float = GRID_PCT,
     apply_costs: bool = True,
     leverage: float = LEVERAGE,
+    daily_loss_cap: float = DAILY_LOSS_CAP,
+    trail_stop: bool = True,
+    trail_pct: float | None = None,
+    symbol_atr: dict[str, float] | None = None,
+    atr_multiplier: float | None = None,
 ) -> pd.DataFrame:
     """Run each symbol through its own isolated backtest (full capital, no
     competition for the 3-slot/4-unit pool). Useful for comparing candidates
     on the morning stock list on equal footing, since running them together
     means only the first few in list order ever get a slot.
     """
+    symbol_atr = symbol_atr or {}
     rows = []
     for symbol in symbols:
         if symbol not in data:
@@ -198,6 +213,11 @@ def per_symbol_comparison(
             grid_pct=grid_pct,
             apply_costs=apply_costs,
             leverage=leverage,
+            daily_loss_cap=daily_loss_cap,
+            trail_stop=trail_stop,
+            trail_pct=trail_pct,
+            symbol_atr={symbol: symbol_atr[symbol]} if symbol in symbol_atr else None,
+            atr_multiplier=atr_multiplier,
         )
         daily = pd.DataFrame(result["daily_results"])
         trades = pd.DataFrame(result["trade_log"])

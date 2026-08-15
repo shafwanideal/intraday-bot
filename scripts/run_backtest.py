@@ -47,18 +47,27 @@ def main() -> None:
         print("No data fetched for any symbol. Aborting.")
         sys.exit(1)
 
-    print(f"\n{'=' * 70}\nGRID = {GRID_PCT:.0%}, LEVERAGE = {backtest.LEVERAGE}x on Rs {backtest.MARGIN_CAPITAL:,} margin\n{'=' * 70}")
+    print("Fetching ATR (14d) for volatility-scaled trailing stop ...")
+    symbol_atr = kite_data.fetch_symbol_atr(SYMBOLS)
+
+    print(f"\n{'=' * 70}\nGRID = {GRID_PCT:.0%}, LEVERAGE = {backtest.LEVERAGE}x on Rs {backtest.MARGIN_CAPITAL:,} margin, ATR trail\n{'=' * 70}")
 
     print(f"\n--- Full 6-symbol portfolio (3 slots / 4 units, entries in list order) ---")
-    full_results = backtest.run_backtest(bars, symbols=SYMBOLS, directions=DIRECTIONS, grid_pct=GRID_PCT)
+    full_results = backtest.run_backtest(
+        bars, symbols=SYMBOLS, directions=DIRECTIONS, grid_pct=GRID_PCT, symbol_atr=symbol_atr, atr_multiplier=backtest.DEFAULT_ATR_MULTIPLIER
+    )
     print(backtest.summarize(full_results, goal_daily_pnl=GOAL_DAILY_PNL))
 
     print(f"\n--- Strong-candidate-only portfolio {STRONG_CANDIDATES} (selection-biased, see caveats) ---")
-    strong_results = backtest.run_backtest(bars, symbols=STRONG_CANDIDATES, directions=DIRECTIONS, grid_pct=GRID_PCT)
+    strong_results = backtest.run_backtest(
+        bars, symbols=STRONG_CANDIDATES, directions=DIRECTIONS, grid_pct=GRID_PCT, symbol_atr=symbol_atr, atr_multiplier=backtest.DEFAULT_ATR_MULTIPLIER
+    )
     print(backtest.summarize(strong_results, goal_daily_pnl=GOAL_DAILY_PNL))
 
     print("\n--- Per-symbol isolated comparison (each gets full capital) ---")
-    comparison = backtest.per_symbol_comparison(bars, symbols=SYMBOLS, directions=DIRECTIONS, grid_pct=GRID_PCT)
+    comparison = backtest.per_symbol_comparison(
+        bars, symbols=SYMBOLS, directions=DIRECTIONS, grid_pct=GRID_PCT, symbol_atr=symbol_atr, atr_multiplier=backtest.DEFAULT_ATR_MULTIPLIER
+    )
     print(comparison.to_string(index=False))
 
     print(CAVEATS)
