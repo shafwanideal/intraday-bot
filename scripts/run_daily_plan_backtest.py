@@ -9,9 +9,9 @@ from src import backtest, data
 # The user's actual morning-of stock picks, as given, one entry per (date, symbol).
 DAILY_PLAN: dict[date, dict[str, str]] = {
     date(2026, 8, 7): {"KALYANKJIL": "long"},  # Kalyan Jewellers
-    date(2026, 8, 10): {"BSE": "long", "AARTIPHARM": "long"},  # BSE, Aarti Pharmalabs
-    date(2026, 8, 12): {"THYROCARE": "long", "MAHABANK": "long"},  # Thyrocare, Bank of Maharashtra
-    date(2026, 8, 13): {"LENSKART": "long"},
+    date(2026, 8, 10): {"AARTIPHARM": "long"},  # Aarti Pharmalabs
+    date(2026, 8, 11): {"BSE": "long", "THYROCARE": "long", "MAHABANK": "long"},  # BSE, Thyrocare, Bank of Maharashtra
+    date(2026, 8, 12): {"LENSKART": "long"},
     date(2026, 8, 14): {"WELSPUNLIV": "long", "TMPV": "short", "GALAXYSURF": "long"},  # Welspun Living, TMPV (short), Galaxy Surfactants
 }
 
