@@ -3,9 +3,10 @@ from datetime import time
 
 import pandas as pd
 
-CAPITAL = 50_000
+MARGIN_CAPITAL = 50_000  # real cash at risk; the daily loss cap and 4-unit slots are against this
 TOTAL_UNITS = 4
-UNIT_SIZE = CAPITAL / TOTAL_UNITS  # 12,500
+MARGIN_PER_UNIT = MARGIN_CAPITAL / TOTAL_UNITS  # 12,500
+LEVERAGE = 5  # Zerodha MIS intraday leverage on equity; varies per stock in reality
 MAX_CONCURRENT_POSITIONS = 3
 GRID_PCT = 0.02
 DAILY_LOSS_CAP = 5_000
@@ -79,15 +80,22 @@ def run_backtest(
     directions: dict[str, str] | None = None,
     grid_pct: float = GRID_PCT,
     apply_costs: bool = True,
+    leverage: float = LEVERAGE,
 ) -> dict:
     """Simulate the grid strategy against real intraday bars.
 
-    Rules implemented (see project brief): 1 unit (of 4, ~Rs 12,500 each) at
-    entry; one averaging leg on a `grid_pct` adverse move; full exit on a
-    `grid_pct` favorable move from average cost; max 3 concurrent positions
-    sharing the 4-unit capital pool; daily loss cap of Rs 5,000 (net of
-    costs) halts and flattens everything for the day; hard square-off of
-    anything still open at 15:15.
+    Rules implemented (see project brief): 1 unit (of 4, ~Rs 12,500 margin
+    each) at entry; one averaging leg on a `grid_pct` adverse move; full
+    exit on a `grid_pct` favorable move from average cost; max 3 concurrent
+    positions sharing the 4-unit margin pool; daily loss cap of Rs 5,000 is
+    checked mark-to-market (realized + unrealized P&L on open positions)
+    every bar, and halts/flattens everything for the day the moment it's
+    breached; hard square-off of anything still open at 15:15.
+
+    Each unit's actual traded value is `MARGIN_PER_UNIT * leverage` (Zerodha
+    MIS intraday leverage), not the raw margin -- the 4-slot bookkeeping
+    tracks margin blocks, but position sizing and P&L/costs are computed on
+    the leveraged notional actually bought/sold.
 
     Entries only happen on the first bar of each day (market open), long by
     default unless `directions[symbol] == "short"`. When `apply_costs` is
@@ -95,6 +103,7 @@ def run_backtest(
     deducted from each closed position's P&L.
     """
     directions = directions or {}
+    exposure_per_unit = MARGIN_PER_UNIT * leverage
     all_days = sorted({ts.date() for sym in symbols if sym in data for ts in data[sym].index})
 
     trade_log: list[dict] = []
@@ -155,7 +164,7 @@ def run_backtest(
                         break
                     price = day_bars[symbol].loc[t, "Open"]
                     direction = directions.get(symbol, "long")
-                    qty = UNIT_SIZE / price
+                    qty = exposure_per_unit / price
                     open_positions[symbol] = Position(
                         symbol=symbol, direction=direction, entry_time=t, legs=[(price, qty)]
                     )
@@ -177,18 +186,24 @@ def run_backtest(
                     continue
 
                 if not pos.averaged and move <= -grid_pct and capital_units_available >= 1:
-                    qty = UNIT_SIZE / price
+                    qty = exposure_per_unit / price
                     pos.legs.append((price, qty))
                     pos.averaged = True
                     capital_units_available -= 1
 
-            if not halted and daily_pnl <= -DAILY_LOSS_CAP:
-                halted = True
-                for symbol in list(open_positions.keys()):
-                    pos = open_positions[symbol]
+            if not halted:
+                unrealized_pnl = 0.0
+                for symbol, pos in open_positions.items():
                     price = day_bars[symbol].loc[t, "Close"] if t in day_bars[symbol].index else pos.avg_price
-                    close(symbol, pos, price, "daily_loss_cap", t)
-                open_positions.clear()
+                    unrealized_pnl += _pnl(pos.direction, pos.avg_price, price, pos.qty)
+
+                if daily_pnl + unrealized_pnl <= -DAILY_LOSS_CAP:
+                    halted = True
+                    for symbol in list(open_positions.keys()):
+                        pos = open_positions[symbol]
+                        price = day_bars[symbol].loc[t, "Close"] if t in day_bars[symbol].index else pos.avg_price
+                        close(symbol, pos, price, "daily_loss_cap", t)
+                    open_positions.clear()
 
             if is_square_off and open_positions:
                 for symbol in list(open_positions.keys()):
@@ -202,7 +217,7 @@ def run_backtest(
     return {"trade_log": trade_log, "daily_results": daily_results}
 
 
-def summarize(results: dict) -> str:
+def summarize(results: dict, goal_daily_pnl: float | None = None) -> str:
     daily = pd.DataFrame(results["daily_results"])
     trades = pd.DataFrame(results["trade_log"])
 
@@ -221,9 +236,17 @@ def summarize(results: dict) -> str:
         lines.append(f"Total transaction costs: Rs {trades['costs'].sum():,.2f}")
     lines.append(f"Total net P&L: Rs {total_pnl:,.2f}")
     lines.append(f"Avg net P&L/day: Rs {daily['pnl'].mean():,.2f}")
+    lines.append(f"Median net P&L/day: Rs {daily['pnl'].median():,.2f}")
     lines.append(f"Win days: {win_days}  Loss days: {loss_days}")
     lines.append(f"Days daily loss cap was hit: {cap_hit_days}")
     lines.append(f"Best day: Rs {daily['pnl'].max():,.2f}  Worst day: Rs {daily['pnl'].min():,.2f}")
+
+    if goal_daily_pnl is not None:
+        days_hit_goal = (daily["pnl"] >= goal_daily_pnl).sum()
+        lines.append(
+            f"Days net P&L >= Rs {goal_daily_pnl:,.0f} goal: {days_hit_goal}/{len(daily)} "
+            f"({days_hit_goal / len(daily):.1%})"
+        )
 
     if not trades.empty:
         lines.append(f"Total trades (legs closed): {len(trades)}")
@@ -242,6 +265,7 @@ def per_symbol_comparison(
     directions: dict[str, str] | None = None,
     grid_pct: float = GRID_PCT,
     apply_costs: bool = True,
+    leverage: float = LEVERAGE,
 ) -> pd.DataFrame:
     """Run each symbol through its own isolated backtest (full capital, no
     competition for the 3-slot/4-unit pool). Useful for comparing candidates
@@ -253,7 +277,12 @@ def per_symbol_comparison(
         if symbol not in data:
             continue
         result = run_backtest(
-            {symbol: data[symbol]}, symbols=[symbol], directions=directions, grid_pct=grid_pct, apply_costs=apply_costs
+            {symbol: data[symbol]},
+            symbols=[symbol],
+            directions=directions,
+            grid_pct=grid_pct,
+            apply_costs=apply_costs,
+            leverage=leverage,
         )
         daily = pd.DataFrame(result["daily_results"])
         trades = pd.DataFrame(result["trade_log"])
