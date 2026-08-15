@@ -3,7 +3,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from src import backtest, data
+from src import backtest, kite_data
 
 SYMBOLS = ["ICICIBANK", "HFCL", "CUPID", "TCS", "WIPRO", "INFY"]
 STRONG_CANDIDATES = ["HFCL", "CUPID", "ICICIBANK"]  # best performers so far -- selection-biased, see caveats
@@ -13,9 +13,9 @@ GOAL_DAILY_PNL = 2_000
 
 CAVEATS = """
 CAVEATS (read before acting on these numbers):
-- Data: Yahoo Finance free intraday data, 5-minute bars, last ~60 calendar
-  days only (~58 trading days). Real market data, not synthetic, but a
-  short/recent window, not a multi-year backtest.
+- Data: Kite Connect historical data API, 5-minute bars, last ~180 calendar
+  days. Same feed Kite quotes/shadow mode use, so no cross-source mismatch
+  with live trading -- but still not a multi-year backtest.
 - Grid trigger levels are evaluated on each 5-min bar's CLOSE, not tick by
   tick, so intrabar breaches may be caught late or missed.
 - Only ONE averaging leg is modeled: entry + one add-on, not a multi-level
@@ -40,8 +40,8 @@ CAVEATS (read before acting on these numbers):
 
 
 def main() -> None:
-    print(f"Fetching intraday data for {SYMBOLS} ...")
-    bars = data.fetch_many(SYMBOLS, period="60d", interval="5m")
+    print(f"Fetching intraday data for {SYMBOLS} from Kite (this re-authenticates if needed) ...")
+    bars = kite_data.fetch_many(SYMBOLS, days=180, interval="5minute")
 
     if not bars:
         print("No data fetched for any symbol. Aborting.")

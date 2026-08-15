@@ -4,7 +4,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from src import backtest, data
+from src import backtest, kite_data
 
 # The user's actual morning-of stock picks, as given, one entry per (date, symbol).
 DAILY_PLAN: dict[date, dict[str, str]] = {
@@ -22,8 +22,8 @@ ALL_SYMBOLS = sorted({sym for day_plan in DAILY_PLAN.values() for sym in day_pla
 
 CAVEATS = """
 CAVEATS:
-- Data: Yahoo Finance free intraday data, 5-minute bars. Real market data,
-  not synthetic.
+- Data: Kite Connect historical data API, 5-minute bars. Same feed as live
+  quotes/shadow mode -- no cross-source mismatch.
 - Grid trigger levels are evaluated on each 5-min bar's CLOSE, not tick by
   tick.
 - Only ONE averaging leg is modeled: entry + one add-on, not a multi-level
@@ -42,8 +42,8 @@ CAVEATS:
 
 
 def main() -> None:
-    print(f"Fetching intraday data for {ALL_SYMBOLS} ...")
-    bars = data.fetch_many(ALL_SYMBOLS, period="60d", interval="5m")
+    print(f"Fetching intraday data for {ALL_SYMBOLS} from Kite ...")
+    bars = kite_data.fetch_many(ALL_SYMBOLS, days=180, interval="5minute")
 
     missing = [s for s in ALL_SYMBOLS if s not in bars]
     if missing:

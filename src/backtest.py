@@ -1,9 +1,9 @@
 import pandas as pd
 
-from src.strategy import GRID_PCT, LEVERAGE, SQUARE_OFF_TIME, GridEngine
+from src.strategy import GRID_PCT, LEVERAGE, MARGIN_CAPITAL, SQUARE_OFF_TIME, GridEngine
 
 # Re-exported for callers/tests that reach for these on this module.
-__all__ = ["run_backtest", "summarize", "per_symbol_comparison", "GRID_PCT", "LEVERAGE"]
+__all__ = ["run_backtest", "summarize", "per_symbol_comparison", "GRID_PCT", "LEVERAGE", "MARGIN_CAPITAL"]
 
 
 def run_backtest(
