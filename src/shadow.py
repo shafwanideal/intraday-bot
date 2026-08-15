@@ -5,12 +5,26 @@ from pathlib import Path
 
 from kiteconnect.exceptions import KiteException
 
-from . import auth
+from . import auth, kite_data
+from .indicators import atr as compute_atr
 from .strategy import SQUARE_OFF_TIME, GridEngine
 
 MARKET_OPEN = time(9, 15)
 MARKET_CLOSE = time(15, 30)
 POLL_INTERVAL_SECONDS = 15
+ATR_MULTIPLIER = 0.5  # trail distance = ATR_MULTIPLIER * symbol's 14-day ATR
+
+
+def _fetch_symbol_atr(symbols: list[str]) -> dict[str, float]:
+    result = {}
+    for symbol in symbols:
+        daily = kite_data.fetch_daily(symbol)
+        value = compute_atr(daily) if not daily.empty else None
+        if value is not None:
+            result[symbol] = value
+        else:
+            print(f"WARNING: could not compute ATR for {symbol}, will use the fixed percentage trail for it")
+    return result
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 TODAYS_STOCKS_FILE = PROJECT_ROOT / "todays_stocks.json"
@@ -59,14 +73,18 @@ def run_shadow(poll_interval: int = POLL_INTERVAL_SECONDS) -> None:
 
     today = date.today()
     logger = ShadowLogger(LOG_DIR / f"shadow_{today.isoformat()}.jsonl")
-    engine = GridEngine()
+    symbol_atr = _fetch_symbol_atr(list(plan.keys()))
+    engine = GridEngine(atr_multiplier=ATR_MULTIPLIER)
     instruments = [f"NSE:{sym}" for sym in plan]
     entered_today: set[str] = set()
 
     print(f"SHADOW MODE (paper trading, no real orders) -- {today}")
     print(f"Plan: {plan}")
+    print(f"ATR (14d): {symbol_atr}")
     print(f"Log: {logger.log_path}\n")
-    logger.event("start", plan=plan, grid_pct=engine.grid_pct, exposure_per_unit=engine.exposure_per_unit)
+    logger.event(
+        "start", plan=plan, grid_pct=engine.grid_pct, exposure_per_unit=engine.exposure_per_unit, symbol_atr=symbol_atr
+    )
 
     try:
         while True:
@@ -95,9 +113,9 @@ def run_shadow(poll_interval: int = POLL_INTERVAL_SECONDS) -> None:
                 if symbol not in entered_today:
                     direction = plan[symbol]
                     open_price = quote["ohlc"]["open"]
-                    if engine.enter(symbol, open_price, direction, datetime.now()):
+                    if engine.enter(symbol, open_price, direction, datetime.now(), atr=symbol_atr.get(symbol)):
                         entered_today.add(symbol)
-                        logger.event("entry", symbol=symbol, direction=direction, price=open_price)
+                        logger.event("entry", symbol=symbol, direction=direction, price=open_price, atr=symbol_atr.get(symbol))
 
             for symbol, price in current_prices.items():
                 result = engine.update(symbol, price, datetime.now())

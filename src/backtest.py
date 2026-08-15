@@ -17,6 +17,8 @@ def run_backtest(
     daily_loss_cap: float = DAILY_LOSS_CAP,
     trail_stop: bool = True,
     trail_pct: float | None = None,
+    symbol_atr: dict[str, float] | None = None,
+    atr_multiplier: float | None = None,
 ) -> dict:
     """Simulate the grid strategy (see `src.strategy.GridEngine`) against real
     intraday bars, bar by bar.
@@ -31,11 +33,19 @@ def run_backtest(
     different, stock list handed to the bot each morning.
 
     If `trail_stop` is True, hitting `grid_pct` favorable move doesn't close
-    the position immediately -- instead it starts trailing a stop `trail_pct`
-    behind the best price seen since (default: half of `grid_pct`, so at
-    least half the original target is locked in even on an immediate reversal).
+    the position immediately -- instead it starts trailing a stop behind the
+    best price seen since. By default that trail distance is `trail_pct`
+    (half of `grid_pct` if not set) as a percentage of price. If
+    `atr_multiplier` is given, the trail distance becomes
+    `atr_multiplier * symbol_atr[symbol]` (absolute price units) instead --
+    a volatility-scaled trail rather than one fixed percentage for every
+    stock. `symbol_atr` should be precomputed (e.g. via
+    `src.indicators.atr` on `src.kite_data.fetch_daily` bars) and is only
+    used for symbols present in it; symbols missing from it fall back to
+    the percentage-based trail even when `atr_multiplier` is set.
     """
     directions = directions or {}
+    symbol_atr = symbol_atr or {}
 
     if daily_plan is not None:
         all_days = sorted(daily_plan.keys())
@@ -67,6 +77,7 @@ def run_backtest(
             daily_loss_cap=daily_loss_cap,
             trail_stop=trail_stop,
             trail_pct=trail_pct,
+            atr_multiplier=atr_multiplier,
         )
 
         for i, t in enumerate(all_times):
@@ -79,7 +90,7 @@ def run_backtest(
                         continue
                     price = day_bars[symbol].loc[t, "Open"]
                     direction = day_directions.get(symbol, "long")
-                    engine.enter(symbol, price, direction, t)  # no-op if slots/capital exhausted
+                    engine.enter(symbol, price, direction, t, atr=symbol_atr.get(symbol))  # no-op if slots/capital exhausted
 
             if engine.halted:
                 continue

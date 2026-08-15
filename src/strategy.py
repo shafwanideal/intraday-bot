@@ -48,6 +48,7 @@ class Position:
     averaged: bool = False
     trailing: bool = False
     peak_price: float | None = None  # best favorable price seen once trailing has started
+    atr: float | None = None  # this symbol's ATR at entry, if using volatility-based trailing
 
     @property
     def qty(self) -> float:
@@ -93,6 +94,7 @@ class GridEngine:
         daily_loss_cap: float = DAILY_LOSS_CAP,
         trail_stop: bool = True,
         trail_pct: float | None = None,
+        atr_multiplier: float | None = None,
     ):
         self.grid_pct = grid_pct
         self.apply_costs = apply_costs
@@ -100,6 +102,7 @@ class GridEngine:
         self.daily_loss_cap = daily_loss_cap
         self.trail_stop = trail_stop
         self.trail_pct = trail_pct if trail_pct is not None else grid_pct / 2
+        self.atr_multiplier = atr_multiplier  # if set, trail distance = atr_multiplier * position's ATR (price units) instead of trail_pct
         self.capital_units_available = TOTAL_UNITS
         self.open_positions: dict[str, Position] = {}
         self.daily_pnl = 0.0
@@ -114,11 +117,13 @@ class GridEngine:
             and self.capital_units_available >= 1
         )
 
-    def enter(self, symbol: str, price: float, direction: str, timestamp) -> bool:
+    def enter(self, symbol: str, price: float, direction: str, timestamp, atr: float | None = None) -> bool:
         if not self.can_enter(symbol):
             return False
         qty = self.exposure_per_unit / price
-        self.open_positions[symbol] = Position(symbol=symbol, direction=direction, entry_time=timestamp, legs=[(price, qty)])
+        self.open_positions[symbol] = Position(
+            symbol=symbol, direction=direction, entry_time=timestamp, legs=[(price, qty)], atr=atr
+        )
         self.capital_units_available -= 1
         return True
 
@@ -154,13 +159,20 @@ class GridEngine:
         pos = self.open_positions[symbol]
 
         if pos.trailing:
+            use_atr = self.atr_multiplier is not None and pos.atr is not None
             if pos.direction == "long":
                 pos.peak_price = max(pos.peak_price, price)
-                pullback = (pos.peak_price - price) / pos.peak_price
+                if use_atr:
+                    triggered = (pos.peak_price - price) >= self.atr_multiplier * pos.atr
+                else:
+                    triggered = (pos.peak_price - price) / pos.peak_price >= self.trail_pct
             else:
                 pos.peak_price = min(pos.peak_price, price)
-                pullback = (price - pos.peak_price) / pos.peak_price
-            if pullback >= self.trail_pct:
+                if use_atr:
+                    triggered = (price - pos.peak_price) >= self.atr_multiplier * pos.atr
+                else:
+                    triggered = (price - pos.peak_price) / pos.peak_price >= self.trail_pct
+            if triggered:
                 return self._close(symbol, price, "trailing_stop_exit", timestamp)
             return None
 

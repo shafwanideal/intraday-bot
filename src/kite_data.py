@@ -79,3 +79,30 @@ def fetch_many(symbols: list[str], days: int = 180, interval: str = "5minute") -
             continue
         data[symbol] = df
     return data
+
+
+def fetch_daily(symbol: str, days: int = 45) -> pd.DataFrame:
+    """Fetch daily OHLC candles for an NSE symbol, e.g. for ATR calculation."""
+    kite = auth.get_kite()
+    tokens = _nse_instrument_tokens(kite)
+    token = tokens.get(symbol)
+    if token is None:
+        print(f"WARNING: {symbol} not found in NSE instrument list, skipping")
+        return pd.DataFrame()
+
+    end = datetime.now()
+    start = end - timedelta(days=days)
+    try:
+        candles = kite.historical_data(token, start, end, "day")
+    except KiteException as exc:
+        print(f"WARNING: daily fetch failed for {symbol}: {exc}")
+        return pd.DataFrame()
+
+    if not candles:
+        return pd.DataFrame()
+
+    df = pd.DataFrame(candles)
+    df = df.rename(columns={"date": "datetime", "open": "Open", "high": "High", "low": "Low", "close": "Close", "volume": "Volume"})
+    df["datetime"] = pd.to_datetime(df["datetime"])
+    df = df.set_index("datetime").sort_index()
+    return df[["Open", "High", "Low", "Close", "Volume"]]
