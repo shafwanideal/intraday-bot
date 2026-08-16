@@ -65,3 +65,12 @@ averaging, target exit, daily loss cap, square-off) to
 `logs/shadow_YYYY-MM-DD.jsonl` and the console. **It never calls any
 order-placement endpoint — nothing real trades.** `todays_stocks.json` is
 gitignored since it changes every day.
+
+You don't have to know your full list by 9:15 — the script re-reads
+`todays_stocks.json` on every poll, so you can add a symbol any time
+(up to the 3-slot cap) while it's already running, no restart needed. A
+symbol present from the start enters at that day's real open price; one
+added later enters at whatever the price is right then (using the day's
+open wouldn't make sense for a symbol you only decided on at 10 AM). No
+new entries are taken after 2:30 PM, since there's not enough of the day
+left for the strategy to do anything with a fresh position.
