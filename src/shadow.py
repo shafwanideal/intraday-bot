@@ -11,6 +11,7 @@ from .strategy import DEFAULT_ATR_MULTIPLIER, SQUARE_OFF_TIME, GridEngine
 MARKET_OPEN = time(9, 15)
 MARKET_CLOSE = time(15, 30)
 POLL_INTERVAL_SECONDS = 15
+LATE_ENTRY_CUTOFF = time(14, 30)  # don't take new entries this close to square-off
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 TODAYS_STOCKS_FILE = PROJECT_ROOT / "todays_stocks.json"
@@ -53,15 +54,25 @@ def run_shadow(poll_interval: int = POLL_INTERVAL_SECONDS) -> None:
     """Paper-trade the grid strategy against LIVE Kite quotes for today's plan.
     Logs every decision (entry, averaging, target exit, loss cap, square-off)
     -- it never calls any order-placement endpoint, so nothing real trades.
+
+    Re-reads todays_stocks.json on every poll, so you can add a symbol
+    (up to the 3-slot cap) any time after starting the script -- you don't
+    need to know your full list before 9:15. A symbol present from the very
+    start enters at the day's actual open price; a symbol that shows up
+    later (you edited the file mid-morning) enters at whatever the current
+    price is right then, since the day's open would no longer be a price
+    you could actually have traded at. No new entries are taken within
+    LATE_ENTRY_CUTOFF of square-off -- not enough of the day left for the
+    strategy to do anything with a fresh position.
     """
     plan = load_todays_plan()
+    original_symbols = set(plan.keys())
     kite = auth.get_kite()
 
     today = date.today()
     logger = ShadowLogger(LOG_DIR / f"shadow_{today.isoformat()}.jsonl")
     symbol_atr = kite_data.fetch_symbol_atr(list(plan.keys()))
     engine = GridEngine(atr_multiplier=DEFAULT_ATR_MULTIPLIER)
-    instruments = [f"NSE:{sym}" for sym in plan]
     entered_today: set[str] = set()
 
     print(f"SHADOW MODE (paper trading, no real orders) -- {today}")
@@ -83,6 +94,24 @@ def run_shadow(poll_interval: int = POLL_INTERVAL_SECONDS) -> None:
                 break
 
             try:
+                latest_plan = load_todays_plan()
+            except RuntimeError as exc:
+                logger.event("plan_reload_error", error=str(exc))
+                latest_plan = plan
+            new_symbols = set(latest_plan.keys()) - set(plan.keys())
+            if new_symbols:
+                new_atr = kite_data.fetch_symbol_atr(list(new_symbols))
+                symbol_atr.update(new_atr)
+                for symbol in new_symbols:
+                    logger.event("plan_updated", symbol=symbol, direction=latest_plan[symbol], atr=symbol_atr.get(symbol))
+            plan = latest_plan
+            # Always keep watching any symbol with an open position, even if it's
+            # since been removed from today's file -- an existing paper position
+            # can't just be abandoned because the file changed.
+            watch_symbols = set(plan.keys()) | set(engine.open_positions.keys())
+            instruments = [f"NSE:{sym}" for sym in watch_symbols]
+
+            try:
                 quotes = kite.ohlc(instruments)
             except KiteException as exc:
                 logger.event("poll_error", error=str(exc))
@@ -90,18 +119,26 @@ def run_shadow(poll_interval: int = POLL_INTERVAL_SECONDS) -> None:
                 continue
 
             current_prices: dict[str, float] = {}
-            for symbol in plan:
+            for symbol in watch_symbols:
                 quote = quotes.get(f"NSE:{symbol}")
                 if quote is None:
                     continue
                 current_prices[symbol] = quote["last_price"]
 
-                if symbol not in entered_today:
+                if symbol in plan and symbol not in entered_today and now < LATE_ENTRY_CUTOFF:
                     direction = plan[symbol]
-                    open_price = quote["ohlc"]["open"]
-                    if engine.enter(symbol, open_price, direction, datetime.now(), atr=symbol_atr.get(symbol)):
+                    is_original = symbol in original_symbols
+                    entry_price = quote["ohlc"]["open"] if is_original else quote["last_price"]
+                    if engine.enter(symbol, entry_price, direction, datetime.now(), atr=symbol_atr.get(symbol)):
                         entered_today.add(symbol)
-                        logger.event("entry", symbol=symbol, direction=direction, price=open_price, atr=symbol_atr.get(symbol))
+                        logger.event(
+                            "entry",
+                            symbol=symbol,
+                            direction=direction,
+                            price=entry_price,
+                            atr=symbol_atr.get(symbol),
+                            late_entry=not is_original,
+                        )
 
             for symbol, price in current_prices.items():
                 result = engine.update(symbol, price, datetime.now())
