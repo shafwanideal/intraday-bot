@@ -76,8 +76,17 @@ def _login_via_local_callback(login_url: str) -> str | None:
     server_thread = threading.Thread(target=server.handle_request)
     server_thread.start()
 
-    print(f"Opening your browser for Kite login: {login_url}")
-    webbrowser.open(login_url)
+    print(f"Open this URL to log in to Kite: {login_url}")
+    try:
+        if not webbrowser.open(login_url):
+            raise webbrowser.Error("no browser available")
+    except webbrowser.Error:
+        print(
+            "(Couldn't auto-open a browser here -- normal on a headless server. "
+            "Open the URL above in your own browser; if you're SSH'd in with "
+            "`-L 8000:localhost:8000` port forwarding, the redirect will reach "
+            "this script automatically.)"
+        )
 
     server_thread.join(timeout=CALLBACK_TIMEOUT_SECONDS)
     server.server_close()
