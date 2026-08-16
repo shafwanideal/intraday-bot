@@ -91,6 +91,8 @@ def run_backtest(
             trail_grace_minutes=trail_grace_minutes,
         )
 
+        last_known_price: dict[str, float] = {}
+
         for i, t in enumerate(all_times):
             is_first_bar = i == 0
             is_square_off = t.time() >= SQUARE_OFF_TIME
@@ -101,7 +103,8 @@ def run_backtest(
                         continue
                     price = day_bars[symbol].loc[t, "Open"]
                     direction = day_directions.get(symbol, "long")
-                    engine.enter(symbol, price, direction, t, atr=symbol_atr.get(symbol))  # no-op if slots/capital exhausted
+                    if engine.enter(symbol, price, direction, t, atr=symbol_atr.get(symbol)):
+                        last_known_price[symbol] = price
 
             if engine.halted:
                 continue
@@ -109,18 +112,22 @@ def run_backtest(
             for symbol in list(engine.open_positions.keys()):
                 if symbol not in day_bars or t not in day_bars[symbol].index:
                     continue
-                engine.update(symbol, day_bars[symbol].loc[t, "Close"], t)
+                price = day_bars[symbol].loc[t, "Close"]
+                last_known_price[symbol] = price
+                engine.update(symbol, price, t)
 
+            # Fall back to each symbol's own last known price (not avg_price/entry
+            # price) when this timestamp isn't in that symbol's bar index -- e.g. one
+            # symbol's feed ends earlier in the day than another's. Falling back to
+            # avg_price would fabricate a "zero movement" close that's just wrong.
             current_prices = {
-                sym: day_bars[sym].loc[t, "Close"] if sym in day_bars and t in day_bars[sym].index else pos.avg_price
-                for sym, pos in engine.open_positions.items()
+                sym: last_known_price.get(sym, pos.avg_price) for sym, pos in engine.open_positions.items()
             }
             engine.check_loss_cap(current_prices, t)
 
             if is_square_off and engine.open_positions:
                 current_prices = {
-                    sym: day_bars[sym].loc[t, "Close"] if sym in day_bars and t in day_bars[sym].index else pos.avg_price
-                    for sym, pos in engine.open_positions.items()
+                    sym: last_known_price.get(sym, pos.avg_price) for sym, pos in engine.open_positions.items()
                 }
                 engine.square_off(current_prices, t)
 
@@ -131,8 +138,7 @@ def run_backtest(
             # silently leaving positions open and dropping their P&L.
             last_t = all_times[-1]
             current_prices = {
-                sym: day_bars[sym].loc[last_t, "Close"] if sym in day_bars and last_t in day_bars[sym].index else pos.avg_price
-                for sym, pos in engine.open_positions.items()
+                sym: last_known_price.get(sym, pos.avg_price) for sym, pos in engine.open_positions.items()
             }
             engine.square_off(current_prices, last_t)
 
