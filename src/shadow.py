@@ -2,11 +2,25 @@ import json
 import time as time_module
 from datetime import date, datetime, time
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from kiteconnect.exceptions import KiteException
 
 from . import auth, kite_data
 from .strategy import DEFAULT_ATR_MULTIPLIER, SQUARE_OFF_TIME, GridEngine
+
+# NSE trades on IST wall-clock time regardless of what timezone the machine
+# running this script is set to (e.g. a VPS defaulting to UTC or the host's
+# own timezone). Always compute "now" explicitly in IST rather than trusting
+# datetime.now() to already be IST -- a bug this exact mismatch caused once
+# (server was in Europe/Berlin, so a naive "now" fell inside market hours
+# when the real IST time was already past close).
+IST = ZoneInfo("Asia/Kolkata")
+
+
+def _now() -> datetime:
+    return datetime.now(IST)
+
 
 MARKET_OPEN = time(9, 15)
 MARKET_CLOSE = time(15, 30)
@@ -44,7 +58,7 @@ class ShadowLogger:
         log_path.parent.mkdir(exist_ok=True)
 
     def event(self, kind: str, **fields) -> None:
-        record = {"timestamp": datetime.now().isoformat(), "kind": kind, **fields}
+        record = {"timestamp": _now().isoformat(), "kind": kind, **fields}
         print(f"[{record['timestamp']}] {kind}: {fields}")
         with open(self.log_path, "a") as f:
             f.write(json.dumps(record, default=str) + "\n")
@@ -69,7 +83,7 @@ def run_shadow(poll_interval: int = POLL_INTERVAL_SECONDS) -> None:
     original_symbols = set(plan.keys())
     kite = auth.get_kite()
 
-    today = date.today()
+    today = _now().date()
     logger = ShadowLogger(LOG_DIR / f"shadow_{today.isoformat()}.jsonl")
     symbol_atr = kite_data.fetch_symbol_atr(list(plan.keys()))
     engine = GridEngine(atr_multiplier=DEFAULT_ATR_MULTIPLIER)
@@ -85,7 +99,7 @@ def run_shadow(poll_interval: int = POLL_INTERVAL_SECONDS) -> None:
 
     try:
         while True:
-            now = datetime.now().time()
+            now = _now().time()
             if now < MARKET_OPEN:
                 time_module.sleep(min(poll_interval, 30))
                 continue
@@ -129,7 +143,7 @@ def run_shadow(poll_interval: int = POLL_INTERVAL_SECONDS) -> None:
                     direction = plan[symbol]
                     is_original = symbol in original_symbols
                     entry_price = quote["ohlc"]["open"] if is_original else quote["last_price"]
-                    if engine.enter(symbol, entry_price, direction, datetime.now(), atr=symbol_atr.get(symbol)):
+                    if engine.enter(symbol, entry_price, direction, _now(), atr=symbol_atr.get(symbol)):
                         entered_today.add(symbol)
                         logger.event(
                             "entry",
@@ -141,15 +155,15 @@ def run_shadow(poll_interval: int = POLL_INTERVAL_SECONDS) -> None:
                         )
 
             for symbol, price in current_prices.items():
-                result = engine.update(symbol, price, datetime.now())
+                result = engine.update(symbol, price, _now())
                 if result:
                     logger.event(result["reason"], **result)
 
-            for result in engine.check_loss_cap(current_prices, datetime.now()):
+            for result in engine.check_loss_cap(current_prices, _now()):
                 logger.event("daily_loss_cap", **result)
 
             if now >= SQUARE_OFF_TIME and engine.open_positions:
-                for result in engine.square_off(current_prices, datetime.now()):
+                for result in engine.square_off(current_prices, _now()):
                     logger.event("square_off", **result)
 
             logger.event(
