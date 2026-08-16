@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field
-from datetime import time
+from datetime import time, timedelta
 
 MARGIN_CAPITAL = 50_000  # real cash at risk; the daily loss cap and 4-unit slots are against this
 TOTAL_UNITS = 4
@@ -9,6 +9,11 @@ MAX_CONCURRENT_POSITIONS = 3
 GRID_PCT = 0.02
 DAILY_LOSS_CAP = 10_000  # raised from Rs 5,000 -- see grid_pct_and_costs memory for the tradeoff
 SQUARE_OFF_TIME = time(15, 15)
+DEFAULT_ATR_MULTIPLIER = 1.0  # trail distance = this * symbol's 14-day ATR
+# Raised from 0.5 (2026-08-15) after user's actual picks (catalyst/earnings-driven,
+# often gap-and-go at open) showed 1.0x beating 0.5x by 24% on 34 real trade cases,
+# even though 0.5x is still better on calmer generic large caps -- see
+# grid_pct_and_costs memory for the full comparison and reasoning.
 
 # Zerodha intraday equity (non-delivery) charges, applied per order.
 BROKERAGE_RATE = 0.0003  # 0.03%, capped at Rs 20/order
@@ -49,6 +54,7 @@ class Position:
     trailing: bool = False
     peak_price: float | None = None  # best favorable price seen once trailing has started
     atr: float | None = None  # this symbol's ATR at entry, if using volatility-based trailing
+    trailing_activated_at: object = None  # timestamp trailing started, for the grace period
 
     @property
     def qty(self) -> float:
@@ -95,6 +101,7 @@ class GridEngine:
         trail_stop: bool = True,
         trail_pct: float | None = None,
         atr_multiplier: float | None = None,
+        trail_grace_minutes: float = 0,
     ):
         self.grid_pct = grid_pct
         self.apply_costs = apply_costs
@@ -103,6 +110,7 @@ class GridEngine:
         self.trail_stop = trail_stop
         self.trail_pct = trail_pct if trail_pct is not None else grid_pct / 2
         self.atr_multiplier = atr_multiplier  # if set, trail distance = atr_multiplier * position's ATR (price units) instead of trail_pct
+        self.trail_grace_minutes = trail_grace_minutes  # no trailing-stop exit allowed this long after trailing activates
         self.capital_units_available = TOTAL_UNITS
         self.open_positions: dict[str, Position] = {}
         self.daily_pnl = 0.0
@@ -172,7 +180,12 @@ class GridEngine:
                     triggered = (price - pos.peak_price) >= self.atr_multiplier * pos.atr
                 else:
                     triggered = (price - pos.peak_price) / pos.peak_price >= self.trail_pct
-            if triggered:
+            in_grace = (
+                self.trail_grace_minutes > 0
+                and pos.trailing_activated_at is not None
+                and (timestamp - pos.trailing_activated_at) < timedelta(minutes=self.trail_grace_minutes)
+            )
+            if triggered and not in_grace:
                 return self._close(symbol, price, "trailing_stop_exit", timestamp)
             return None
 
@@ -182,6 +195,7 @@ class GridEngine:
             if self.trail_stop:
                 pos.trailing = True
                 pos.peak_price = price
+                pos.trailing_activated_at = timestamp
                 return None
             return self._close(symbol, price, "target_exit", timestamp)
 

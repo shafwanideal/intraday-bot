@@ -28,6 +28,7 @@ def run_backtest(
     trail_pct: float | None = None,
     symbol_atr: dict[str, float] | None = None,
     atr_multiplier: float | None = None,
+    trail_grace_minutes: float = 0,
 ) -> dict:
     """Simulate the grid strategy (see `src.strategy.GridEngine`) against real
     intraday bars, bar by bar.
@@ -87,6 +88,7 @@ def run_backtest(
             trail_stop=trail_stop,
             trail_pct=trail_pct,
             atr_multiplier=atr_multiplier,
+            trail_grace_minutes=trail_grace_minutes,
         )
 
         for i, t in enumerate(all_times):
