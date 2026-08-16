@@ -7,6 +7,11 @@ load_dotenv()
 KITE_API_KEY = os.environ.get("KITE_API_KEY")
 KITE_API_SECRET = os.environ.get("KITE_API_SECRET")
 
+# Safety gate: real orders (src/live.py) refuse to run at all unless this is
+# explicitly "true" in .env. Not set by .env.example on purpose -- must be a
+# deliberate, separate opt-in, not something copy-pasted in by default.
+LIVE_TRADING_ENABLED = os.environ.get("LIVE_TRADING_ENABLED", "").strip().lower() == "true"
+
 SESSION_FILE = os.path.join(os.path.dirname(os.path.dirname(__file__)), ".kite_session.json")
 
 

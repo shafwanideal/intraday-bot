@@ -125,10 +125,16 @@ class GridEngine:
             and self.capital_units_available >= 1
         )
 
-    def enter(self, symbol: str, price: float, direction: str, timestamp, atr: float | None = None) -> bool:
+    def enter(
+        self, symbol: str, price: float, direction: str, timestamp, atr: float | None = None, quantity: float | None = None
+    ) -> bool:
+        """`quantity` overrides the computed `exposure_per_unit / price` size --
+        callers placing real orders should pass the REAL filled quantity here
+        (whole shares) so the engine's bookkeeping matches what's actually
+        held, rather than the fractional paper-trading default."""
         if not self.can_enter(symbol):
             return False
-        qty = self.exposure_per_unit / price
+        qty = quantity if quantity is not None else self.exposure_per_unit / price
         self.open_positions[symbol] = Position(
             symbol=symbol, direction=direction, entry_time=timestamp, legs=[(price, qty)], atr=atr
         )
