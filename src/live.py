@@ -147,7 +147,18 @@ def run_live(poll_interval: int = POLL_INTERVAL_SECONDS) -> None:
     )
 
     def place_and_confirm(symbol: str, transaction_type: str, quantity: int, tag: str) -> dict:
-        order_id = orders.place_market_order(kite, symbol, transaction_type, quantity, tag=tag)
+        try:
+            order_id = orders.place_market_order(kite, symbol, transaction_type, quantity, tag=tag)
+        except orders.OrderPlacementAmbiguous as exc:
+            logger.critical(
+                f"{symbol} {transaction_type} order placement is in an UNKNOWN state -- {exc}",
+                symbol=symbol,
+                transaction_type=transaction_type,
+                quantity=quantity,
+                tag=tag,
+            )
+            engine.halted = True
+            return {"status": "AMBIGUOUS", "average_price": None, "filled_quantity": 0, "raw": None}
         logger.event("order_placed", symbol=symbol, transaction_type=transaction_type, quantity=quantity, order_id=order_id, tag=tag)
         result = orders.wait_for_fill(kite, order_id)
         logger.event("order_result", symbol=symbol, order_id=order_id, **{k: v for k, v in result.items() if k != "raw"})
