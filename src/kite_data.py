@@ -66,7 +66,12 @@ def fetch_intraday(symbol: str, days: int = 180, interval: str = "5minute") -> p
             rows.extend(candles)
         except KiteException as exc:
             print(f"WARNING: historical fetch failed for {symbol} {chunk_start.date()}-{chunk_end.date()}: {exc}")
-        chunk_start = chunk_end + timedelta(days=1)
+        # Chain directly onto chunk_end (not chunk_end + 1 day): a gap here
+        # can overshoot past `end` when `days` lands exactly on a multiple of
+        # (CHUNK_DAYS + 1), silently dropping the most recent day's data --
+        # which includes the default days=180 used throughout this project's
+        # backtests. Any duplicate boundary candle this causes is deduped below.
+        chunk_start = chunk_end
         time.sleep(REQUEST_DELAY_SECONDS)
 
     if not rows:
@@ -80,6 +85,7 @@ def fetch_intraday(symbol: str, days: int = 180, interval: str = "5minute") -> p
     else:
         df["datetime"] = df["datetime"].dt.tz_convert("Asia/Kolkata")
     df = df.set_index("datetime").sort_index()
+    df = df[~df.index.duplicated(keep="first")]
     df = df.between_time(MARKET_OPEN, MARKET_CLOSE)
     return df[["Open", "High", "Low", "Close", "Volume"]]
 
