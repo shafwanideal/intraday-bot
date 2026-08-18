@@ -32,7 +32,11 @@ LATE_ENTRY_CUTOFF = time(14, 30)
 CONFIRM_PHRASE = "I CONFIRM LIVE TRADING WITH REAL MONEY"
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-TODAYS_STOCKS_FILE = PROJECT_ROOT / "todays_stocks.json"
+# Deliberately a SEPARATE file from shadow.py's todays_stocks.json -- the two
+# must never share a stock list. Editing the shadow-mode list for paper
+# trading must not be able to silently change what real orders get placed,
+# and vice versa.
+TODAYS_STOCKS_FILE = PROJECT_ROOT / "todays_live_stocks.json"
 LOG_DIR = PROJECT_ROOT / "logs"
 
 
