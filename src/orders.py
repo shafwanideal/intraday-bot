@@ -1,8 +1,11 @@
 import time as time_module
+from decimal import ROUND_HALF_UP, Decimal
 
 import requests
 from kiteconnect import KiteConnect
 from kiteconnect.exceptions import KiteException
+
+from . import kite_data
 
 FILL_TIMEOUT_SECONDS = 30
 FILL_POLL_INTERVAL_SECONDS = 1.0
@@ -22,10 +25,24 @@ LIMIT_PRICE_BUFFER_PCT = 0.005  # 0.5%
 PLACEMENT_EXCEPTIONS = (KiteException, requests.exceptions.RequestException)
 
 
-def _protected_limit_price(reference_price: float, transaction_type: str) -> float:
-    if transaction_type == "BUY":
-        return round(reference_price * (1 + LIMIT_PRICE_BUFFER_PCT), 2)
-    return round(reference_price * (1 - LIMIT_PRICE_BUFFER_PCT), 2)
+def _protected_limit_price(reference_price: float, transaction_type: str, tick_size: float) -> float:
+    """Kite rejects any LIMIT price that isn't an exact multiple of the
+    instrument's tick size (commonly 0.05, but not guaranteed) -- round to
+    the nearest valid tick after applying the buffer.
+
+    Uses Decimal rather than plain float arithmetic: binary floats can't
+    exactly represent values like 906.3, so a naive float round-to-tick can
+    produce a price that's off by a tiny fraction of a paisa -- harmless to
+    a human eye, but real money, and not worth risking a rejection (or
+    worse, a silently-accepted-but-wrong price) over avoidable imprecision.
+    """
+    buffer = Decimal(str(LIMIT_PRICE_BUFFER_PCT))
+    multiplier = Decimal("1") + (buffer if transaction_type == "BUY" else -buffer)
+    ref = Decimal(str(reference_price))
+    tick = Decimal(str(tick_size))
+    buffered = ref * multiplier
+    ticks = (buffered / tick).to_integral_value(rounding=ROUND_HALF_UP)
+    return float(ticks * tick)
 
 
 class OrderPlacementAmbiguous(Exception):
@@ -57,7 +74,8 @@ def place_market_order(
     order that may have gone through anyway; if none is found, raises
     OrderPlacementAmbiguous rather than guessing.
     """
-    limit_price = _protected_limit_price(reference_price, transaction_type)
+    tick_size = kite_data.get_tick_size(kite, symbol)
+    limit_price = _protected_limit_price(reference_price, transaction_type, tick_size)
     try:
         return kite.place_order(
             variety=kite.VARIETY_REGULAR,

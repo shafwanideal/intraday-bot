@@ -12,14 +12,28 @@ CHUNK_DAYS = 59  # stay under Kite's per-request window for minute-level candles
 REQUEST_DELAY_SECONDS = 0.4  # stay under Kite's ~3 req/sec rate limit
 
 _instrument_cache: dict[str, int] | None = None
+_tick_size_cache: dict[str, float] | None = None
+
+
+def _nse_instruments(kite) -> list[dict]:
+    return kite.instruments("NSE")
 
 
 def _nse_instrument_tokens(kite) -> dict[str, int]:
     global _instrument_cache
     if _instrument_cache is None:
-        instruments = kite.instruments("NSE")
-        _instrument_cache = {i["tradingsymbol"]: i["instrument_token"] for i in instruments}
+        _instrument_cache = {i["tradingsymbol"]: i["instrument_token"] for i in _nse_instruments(kite)}
     return _instrument_cache
+
+
+def get_tick_size(kite, symbol: str) -> float:
+    """The minimum price increment NSE allows for this symbol's orders --
+    typically 0.05, but not guaranteed the same for every instrument. Any
+    LIMIT order price must be an exact multiple of this or Kite rejects it."""
+    global _tick_size_cache
+    if _tick_size_cache is None:
+        _tick_size_cache = {i["tradingsymbol"]: i["tick_size"] for i in _nse_instruments(kite)}
+    return _tick_size_cache.get(symbol, 0.05)  # 0.05 is the standard NSE equity default
 
 
 def fetch_intraday(symbol: str, days: int = 180, interval: str = "5minute") -> pd.DataFrame:
