@@ -4,9 +4,16 @@ from datetime import date, datetime, time
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+import requests
 from kiteconnect.exceptions import KiteException
 
 from . import auth, kite_data
+
+# Anything network-shaped (timeout, connection reset, DNS blip) as well as
+# Kite's own error responses -- a poll failing must never crash the whole
+# session. Over a 6-hour polling loop, a transient network hiccup is not a
+# rare edge case, it's close to guaranteed to happen at least once.
+POLL_EXCEPTIONS = (KiteException, requests.exceptions.RequestException)
 from .strategy import DEFAULT_ATR_MULTIPLIER, SQUARE_OFF_TIME, GridEngine
 
 # NSE trades on IST wall-clock time regardless of what timezone the machine
@@ -114,11 +121,20 @@ def run_shadow(poll_interval: int = POLL_INTERVAL_SECONDS) -> None:
                 latest_plan = plan
             new_symbols = set(latest_plan.keys()) - set(plan.keys())
             if new_symbols:
-                new_atr = kite_data.fetch_symbol_atr(list(new_symbols))
-                symbol_atr.update(new_atr)
-                for symbol in new_symbols:
-                    logger.event("plan_updated", symbol=symbol, direction=latest_plan[symbol], atr=symbol_atr.get(symbol))
-            plan = latest_plan
+                try:
+                    new_atr = kite_data.fetch_symbol_atr(list(new_symbols))
+                    symbol_atr.update(new_atr)
+                    for symbol in new_symbols:
+                        logger.event("plan_updated", symbol=symbol, direction=latest_plan[symbol], atr=symbol_atr.get(symbol))
+                    plan = latest_plan
+                except POLL_EXCEPTIONS as exc:
+                    logger.event("atr_fetch_error", symbols=list(new_symbols), error=str(exc))
+                    # Keep the old plan this round (don't adopt the new symbols
+                    # yet) and retry next poll -- entering without a real ATR
+                    # value would silently fall back to the percentage-based
+                    # trail instead of what was actually intended.
+            else:
+                plan = latest_plan
             # Always keep watching any symbol with an open position, even if it's
             # since been removed from today's file -- an existing paper position
             # can't just be abandoned because the file changed.
@@ -127,7 +143,7 @@ def run_shadow(poll_interval: int = POLL_INTERVAL_SECONDS) -> None:
 
             try:
                 quotes = kite.ohlc(instruments)
-            except KiteException as exc:
+            except POLL_EXCEPTIONS as exc:
                 logger.event("poll_error", error=str(exc))
                 time_module.sleep(poll_interval)
                 continue

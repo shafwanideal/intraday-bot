@@ -5,12 +5,19 @@ from datetime import datetime, time
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+import requests
 from kiteconnect.exceptions import KiteException
 
 from . import auth, config, kite_data, orders
 from .strategy import DEFAULT_ATR_MULTIPLIER, MARGIN_CAPITAL, SQUARE_OFF_TIME, GridEngine
 
 IST = ZoneInfo("Asia/Kolkata")
+
+# A poll failing (timeout, connection reset) must never crash the whole
+# session -- see the equivalent constant in shadow.py for why. This matters
+# even more here since a crash mid-day would leave REAL open positions
+# unmonitored (no loss-cap checks, no square-off).
+POLL_EXCEPTIONS = (KiteException, requests.exceptions.RequestException)
 
 
 def _now() -> datetime:
@@ -163,14 +170,20 @@ def run_live(poll_interval: int = POLL_INTERVAL_SECONDS) -> None:
                 latest_plan = plan
             new_symbols = set(latest_plan.keys()) - set(plan.keys())
             if new_symbols:
-                symbol_atr.update(kite_data.fetch_symbol_atr(list(new_symbols)))
-            plan = latest_plan
+                try:
+                    symbol_atr.update(kite_data.fetch_symbol_atr(list(new_symbols)))
+                    plan = latest_plan
+                except POLL_EXCEPTIONS as exc:
+                    logger.event("atr_fetch_error", symbols=list(new_symbols), error=str(exc))
+                    # Keep the old plan this round, retry next poll -- see shadow.py.
+            else:
+                plan = latest_plan
             watch_symbols = set(plan.keys()) | set(engine.open_positions.keys())
             instruments = [f"NSE:{sym}" for sym in watch_symbols]
 
             try:
                 quotes = kite.ohlc(instruments)
-            except KiteException as exc:
+            except POLL_EXCEPTIONS as exc:
                 logger.event("poll_error", error=str(exc))
                 time_module.sleep(poll_interval)
                 continue
