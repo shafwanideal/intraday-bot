@@ -29,9 +29,15 @@ def main() -> None:
         print("Confirmation did not match -- aborting. No orders placed.")
         return
 
-    print(f"\nPlacing BUY order: {TEST_QUANTITY} share(s) of {TEST_SYMBOL}, MIS market order...")
+    quote = kite.ohlc([f"NSE:{TEST_SYMBOL}"])[f"NSE:{TEST_SYMBOL}"]
+    reference_price = quote["last_price"]
+    print(f"Current {TEST_SYMBOL} price: {reference_price}")
+
+    print(f"\nPlacing BUY order: {TEST_QUANTITY} share(s) of {TEST_SYMBOL}, MIS order (protected limit)...")
     try:
-        buy_order_id = orders.place_market_order(kite, TEST_SYMBOL, "BUY", TEST_QUANTITY, tag="pipeline_test_buy")
+        buy_order_id = orders.place_market_order(
+            kite, TEST_SYMBOL, "BUY", TEST_QUANTITY, reference_price, tag="pipeline_test_buy"
+        )
     except orders.OrderPlacementAmbiguous as exc:
         print(f"\nCRITICAL: {exc}")
         print("Check Kite directly RIGHT NOW to see if this order actually went through.")
@@ -46,10 +52,11 @@ def main() -> None:
         print(f"Full result: {buy_result}")
         return
 
-    print("\nBuy confirmed. Immediately closing out with a SELL order...")
+    sell_reference_price = kite.ohlc([f"NSE:{TEST_SYMBOL}"])[f"NSE:{TEST_SYMBOL}"]["last_price"]
+    print(f"\nBuy confirmed. Immediately closing out with a SELL order (reference price: {sell_reference_price})...")
     try:
         sell_order_id = orders.place_market_order(
-            kite, TEST_SYMBOL, "SELL", buy_result["filled_quantity"], tag="pipeline_test_sell"
+            kite, TEST_SYMBOL, "SELL", buy_result["filled_quantity"], sell_reference_price, tag="pipeline_test_sell"
         )
     except orders.OrderPlacementAmbiguous as exc:
         print(f"\nCRITICAL: {exc}")

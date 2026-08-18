@@ -150,9 +150,9 @@ def run_live(poll_interval: int = POLL_INTERVAL_SECONDS) -> None:
         "start", plan=plan, grid_pct=engine.grid_pct, exposure_per_unit=engine.exposure_per_unit, symbol_atr=symbol_atr
     )
 
-    def place_and_confirm(symbol: str, transaction_type: str, quantity: int, tag: str) -> dict:
+    def place_and_confirm(symbol: str, transaction_type: str, quantity: int, reference_price: float, tag: str) -> dict:
         try:
-            order_id = orders.place_market_order(kite, symbol, transaction_type, quantity, tag=tag)
+            order_id = orders.place_market_order(kite, symbol, transaction_type, quantity, reference_price, tag=tag)
         except orders.OrderPlacementAmbiguous as exc:
             logger.critical(
                 f"{symbol} {transaction_type} order placement is in an UNKNOWN state -- {exc}",
@@ -221,7 +221,7 @@ def run_live(poll_interval: int = POLL_INTERVAL_SECONDS) -> None:
                         continue
 
                     transaction_type = "BUY" if direction == "long" else "SELL"
-                    result = place_and_confirm(symbol, transaction_type, quantity, tag="entry")
+                    result = place_and_confirm(symbol, transaction_type, quantity, ref_price, tag="entry")
                     entered_today.add(symbol)  # one entry attempt per symbol per day, win or lose
                     if result["status"] == "COMPLETE" and result["average_price"]:
                         filled_qty = result["filled_quantity"] or quantity
@@ -254,7 +254,7 @@ def run_live(poll_interval: int = POLL_INTERVAL_SECONDS) -> None:
                         engine.halted = True
                         continue
                     transaction_type = "SELL" if result["direction"] == "long" else "BUY"
-                    fill = place_and_confirm(symbol, transaction_type, sell_qty, tag=result["reason"])
+                    fill = place_and_confirm(symbol, transaction_type, sell_qty, price, tag=result["reason"])
                     if fill["status"] != "COMPLETE":
                         engine.halted = True
                         logger.critical(
@@ -283,7 +283,7 @@ def run_live(poll_interval: int = POLL_INTERVAL_SECONDS) -> None:
                         engine.halted = True
                         continue
                     transaction_type = "BUY" if pos.direction == "long" else "SELL"
-                    fill = place_and_confirm(symbol, transaction_type, avg_qty, tag="averaging")
+                    fill = place_and_confirm(symbol, transaction_type, avg_qty, price, tag="averaging")
                     if fill["status"] != "COMPLETE":
                         engine.halted = True
                         logger.critical(
@@ -308,7 +308,7 @@ def run_live(poll_interval: int = POLL_INTERVAL_SECONDS) -> None:
                     )
                     continue
                 transaction_type = "SELL" if result["direction"] == "long" else "BUY"
-                fill = place_and_confirm(symbol, transaction_type, sell_qty, tag="daily_loss_cap")
+                fill = place_and_confirm(symbol, transaction_type, sell_qty, result["exit_price"], tag="daily_loss_cap")
                 if fill["status"] != "COMPLETE":
                     logger.critical(
                         f"{symbol} daily-loss-cap exit did NOT confirm filled -- "
@@ -331,7 +331,7 @@ def run_live(poll_interval: int = POLL_INTERVAL_SECONDS) -> None:
                         )
                         continue
                     transaction_type = "SELL" if result["direction"] == "long" else "BUY"
-                    fill = place_and_confirm(symbol, transaction_type, sell_qty, tag="square_off")
+                    fill = place_and_confirm(symbol, transaction_type, sell_qty, result["exit_price"], tag="square_off")
                     if fill["status"] != "COMPLETE":
                         logger.critical(
                             f"{symbol} SQUARE-OFF order did NOT confirm filled -- "

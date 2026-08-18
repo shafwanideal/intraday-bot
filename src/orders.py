@@ -8,9 +8,24 @@ FILL_TIMEOUT_SECONDS = 30
 FILL_POLL_INTERVAL_SECONDS = 1.0
 TERMINAL_STATUSES = {"COMPLETE", "REJECTED", "CANCELLED"}
 
+# Kite's API rejects plain MARKET orders outright ("Market orders without
+# market protection are not allowed via API"). The standard workaround --
+# and arguably better practice anyway, since it caps worst-case slippage --
+# is a LIMIT order priced a small buffer beyond the reference price, wide
+# enough to fill immediately against the current bid/ask like a market
+# order would, but capped so a freak price spike can't fill at an
+# arbitrarily bad price.
+LIMIT_PRICE_BUFFER_PCT = 0.005  # 0.5%
+
 # A network error during any Kite call (not just a clean rejection) --
 # doesn't tell us whether the request actually reached Kite's servers.
 PLACEMENT_EXCEPTIONS = (KiteException, requests.exceptions.RequestException)
+
+
+def _protected_limit_price(reference_price: float, transaction_type: str) -> float:
+    if transaction_type == "BUY":
+        return round(reference_price * (1 + LIMIT_PRICE_BUFFER_PCT), 2)
+    return round(reference_price * (1 - LIMIT_PRICE_BUFFER_PCT), 2)
 
 
 class OrderPlacementAmbiguous(Exception):
@@ -22,8 +37,14 @@ class OrderPlacementAmbiguous(Exception):
     surface this for a human to check Kite directly."""
 
 
-def place_market_order(kite: KiteConnect, symbol: str, transaction_type: str, quantity: int, tag: str | None = None) -> str:
-    """Place a real MIS (intraday) market order on NSE. Returns the order_id.
+def place_market_order(
+    kite: KiteConnect, symbol: str, transaction_type: str, quantity: int, reference_price: float, tag: str | None = None
+) -> str:
+    """Place a real MIS (intraday) order on NSE that behaves like a market
+    order -- fills immediately at the best available price -- but is
+    actually a LIMIT order priced LIMIT_PRICE_BUFFER_PCT beyond
+    `reference_price` (the current LTP or similar), since Kite's API
+    rejects plain market orders outright. Returns the order_id.
 
     transaction_type must be "BUY" or "SELL". A returned order_id does NOT
     mean the order filled, only that Kite accepted the request; use
@@ -36,6 +57,7 @@ def place_market_order(kite: KiteConnect, symbol: str, transaction_type: str, qu
     order that may have gone through anyway; if none is found, raises
     OrderPlacementAmbiguous rather than guessing.
     """
+    limit_price = _protected_limit_price(reference_price, transaction_type)
     try:
         return kite.place_order(
             variety=kite.VARIETY_REGULAR,
@@ -44,7 +66,8 @@ def place_market_order(kite: KiteConnect, symbol: str, transaction_type: str, qu
             transaction_type=transaction_type,
             quantity=quantity,
             product=kite.PRODUCT_MIS,
-            order_type=kite.ORDER_TYPE_MARKET,
+            order_type=kite.ORDER_TYPE_LIMIT,
+            price=limit_price,
             tag=tag,
         )
     except PLACEMENT_EXCEPTIONS as exc:
