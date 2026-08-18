@@ -28,6 +28,14 @@ MARKET_OPEN = time(9, 15)
 MARKET_CLOSE = time(15, 30)
 POLL_INTERVAL_SECONDS = 15
 LATE_ENTRY_CUTOFF = time(14, 30)
+# The day's official open is only a realistic, fillable reference price for a
+# real order if we're actually placing it close to when the market opened --
+# not "was this symbol in the plan file when the script started," since the
+# script itself might not start until well after 9:15 (e.g. adding a stock
+# to a session that's already running mid-afternoon). Using a stale open
+# price hours later would size a limit order around a price the market has
+# long since moved away from, and it would likely just never fill.
+NEAR_OPEN_WINDOW_MINUTES = 5
 
 CONFIRM_PHRASE = "I CONFIRM LIVE TRADING WITH REAL MONEY"
 
@@ -128,7 +136,6 @@ def run_live(poll_interval: int = POLL_INTERVAL_SECONDS) -> None:
         )
 
     plan = _load_todays_plan()
-    original_symbols = set(plan.keys())
     kite = auth.get_kite()
 
     today = _now().date()
@@ -212,8 +219,11 @@ def run_live(poll_interval: int = POLL_INTERVAL_SECONDS) -> None:
 
                 if symbol in plan and symbol not in entered_today and now < LATE_ENTRY_CUTOFF and engine.can_enter(symbol):
                     direction = plan[symbol]
-                    is_original = symbol in original_symbols
-                    ref_price = quote["ohlc"]["open"] if is_original else quote["last_price"]
+                    minutes_since_open = (
+                        datetime.combine(_now().date(), now) - datetime.combine(_now().date(), MARKET_OPEN)
+                    ).total_seconds() / 60
+                    near_open = 0 <= minutes_since_open <= NEAR_OPEN_WINDOW_MINUTES
+                    ref_price = quote["ohlc"]["open"] if near_open else quote["last_price"]
                     quantity = _quantity_for(engine.exposure_per_unit, ref_price)
                     if quantity < 1:
                         logger.event("entry_skipped_zero_qty", symbol=symbol, ref_price=ref_price)
