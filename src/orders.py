@@ -20,9 +20,17 @@ TERMINAL_STATUSES = {"COMPLETE", "REJECTED", "CANCELLED"}
 # arbitrarily bad price.
 LIMIT_PRICE_BUFFER_PCT = 0.005  # 0.5%
 
-# A network error during any Kite call (not just a clean rejection) --
-# doesn't tell us whether the request actually reached Kite's servers.
-PLACEMENT_EXCEPTIONS = (KiteException, requests.exceptions.RequestException)
+# A network-level error (timeout, connection reset) never reached Kite's
+# servers in any confirmable way -- these are the genuinely ambiguous ones.
+# A KiteException (InputException, PermissionException, etc, including the
+# confusingly-named NetworkException) is only ever raised by kiteconnect
+# after it received and parsed an actual error response FROM Kite -- the
+# request definitely arrived and was definitely rejected for a known reason.
+# That's a clean failure, not an ambiguous one; treating it as ambiguous
+# (see OrderPlacementAmbiguous below) would halt an entire session over one
+# stock-specific rejection that has nothing to do with the other symbols.
+AMBIGUOUS_EXCEPTIONS = (requests.exceptions.RequestException,)
+PLACEMENT_EXCEPTIONS = (KiteException, requests.exceptions.RequestException)  # used where the distinction doesn't matter (polling reads)
 
 
 def _protected_limit_price(reference_price: float, transaction_type: str, tick_size: float) -> float:
@@ -45,13 +53,22 @@ def _protected_limit_price(reference_price: float, transaction_type: str, tick_s
     return float(ticks * tick)
 
 
+class OrderRejected(Exception):
+    """Kite received the order request and definitively rejected it (bad
+    params, MIS blocked for this instrument, insufficient margin, etc). Not
+    ambiguous -- we know for certain no order was placed. Safe to just log
+    and move on to other symbols; no need to halt the whole session over
+    one stock-specific rejection."""
+
+
 class OrderPlacementAmbiguous(Exception):
-    """place_market_order() failed and we could not confirm via kite.orders()
-    whether the order actually reached the exchange. This is a real-money
-    unknown state -- do NOT retry placing the same order (the original
-    request may have succeeded despite the error response never reaching
-    us, so retrying risks a duplicate real order). Caller must halt and
-    surface this for a human to check Kite directly."""
+    """The placement request itself failed at the network level (timeout,
+    connection reset) and we could not confirm via kite.orders() whether it
+    actually reached the exchange anyway. This is a real-money unknown
+    state -- do NOT retry placing the same order (the original request may
+    have succeeded despite the error response never reaching us, so
+    retrying risks a duplicate real order). Caller must halt and surface
+    this for a human to check Kite directly."""
 
 
 def place_market_order(
@@ -67,12 +84,13 @@ def place_market_order(
     mean the order filled, only that Kite accepted the request; use
     wait_for_fill() to confirm the actual outcome.
 
-    If the placement call itself fails (network error, timeout), this does
-    NOT retry -- a network error doesn't tell us whether the original
-    request reached Kite before failing, and blindly retrying risks placing
-    a real duplicate order. Instead it checks kite.orders() for a matching
-    order that may have gone through anyway; if none is found, raises
-    OrderPlacementAmbiguous rather than guessing.
+    Raises OrderRejected if Kite cleanly rejected the request (a definite,
+    known outcome -- e.g. MIS blocked for this instrument) -- caller should
+    just skip this symbol, not halt everything. Raises
+    OrderPlacementAmbiguous only for a genuine network-level failure, where
+    it's unclear whether the request reached Kite at all; does NOT retry in
+    that case (checks kite.orders() for a possible match first, since
+    blindly retrying risks a duplicate real order).
     """
     tick_size = kite_data.get_tick_size(kite, symbol)
     limit_price = _protected_limit_price(reference_price, transaction_type, tick_size)
@@ -88,7 +106,9 @@ def place_market_order(
             price=limit_price,
             tag=tag,
         )
-    except PLACEMENT_EXCEPTIONS as exc:
+    except KiteException as exc:
+        raise OrderRejected(f"place_order({symbol}, {transaction_type}, qty={quantity}) was rejected by Kite: {exc}") from exc
+    except AMBIGUOUS_EXCEPTIONS as exc:
         order_id = _find_recent_matching_order(kite, symbol, transaction_type, quantity, tag)
         if order_id:
             return order_id

@@ -157,9 +157,34 @@ def run_live(poll_interval: int = POLL_INTERVAL_SECONDS) -> None:
         "start", plan=plan, grid_pct=engine.grid_pct, exposure_per_unit=engine.exposure_per_unit, symbol_atr=symbol_atr
     )
 
-    def place_and_confirm(symbol: str, transaction_type: str, quantity: int, reference_price: float, tag: str) -> dict:
+    def place_and_confirm(
+        symbol: str, transaction_type: str, quantity: int, reference_price: float, tag: str, is_entry: bool = False
+    ) -> dict:
         try:
             order_id = orders.place_market_order(kite, symbol, transaction_type, quantity, reference_price, tag=tag)
+        except orders.OrderRejected as exc:
+            if is_entry:
+                # Kite cleanly rejected this -- we know for certain no position was
+                # opened. Safe to just skip this one symbol; no reason to stop the
+                # rest of the day's other symbols over a stock-specific rejection.
+                logger.event("order_rejected", symbol=symbol, transaction_type=transaction_type, quantity=quantity, tag=tag, error=str(exc))
+                return {"status": "REJECTED", "average_price": None, "filled_quantity": 0, "raw": None}
+            # For anything that isn't an entry (exit/averaging/loss-cap/square-off),
+            # GridEngine already updated its own bookkeeping to assume this order
+            # would succeed BEFORE we attempted the real one. A clean rejection here
+            # means we know FOR CERTAIN the real position is still open even though
+            # the engine now thinks it's closed -- arguably worse than the ambiguous
+            # case, since it's not a maybe, it's a definite mismatch. Halt either way.
+            logger.critical(
+                f"{symbol} {transaction_type} order was REJECTED by Kite -- the real position is definitely still "
+                f"open/unclosed even though the engine's bookkeeping now assumes otherwise: {exc}",
+                symbol=symbol,
+                transaction_type=transaction_type,
+                quantity=quantity,
+                tag=tag,
+            )
+            engine.halted = True
+            return {"status": "REJECTED", "average_price": None, "filled_quantity": 0, "raw": None}
         except orders.OrderPlacementAmbiguous as exc:
             logger.critical(
                 f"{symbol} {transaction_type} order placement is in an UNKNOWN state -- {exc}",
@@ -231,7 +256,7 @@ def run_live(poll_interval: int = POLL_INTERVAL_SECONDS) -> None:
                         continue
 
                     transaction_type = "BUY" if direction == "long" else "SELL"
-                    result = place_and_confirm(symbol, transaction_type, quantity, ref_price, tag="entry")
+                    result = place_and_confirm(symbol, transaction_type, quantity, ref_price, tag="entry", is_entry=True)
                     entered_today.add(symbol)  # one entry attempt per symbol per day, win or lose
                     if result["status"] == "COMPLETE" and result["average_price"]:
                         filled_qty = result["filled_quantity"] or quantity
