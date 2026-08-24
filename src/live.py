@@ -9,7 +9,7 @@ import requests
 from kiteconnect.exceptions import KiteException
 
 from . import auth, config, kite_data, orders
-from .strategy import DEFAULT_ATR_MULTIPLIER, MARGIN_CAPITAL, SQUARE_OFF_TIME, GridEngine
+from .strategy import DEFAULT_ATR_MULTIPLIER, MARGIN_CAPITAL, SQUARE_OFF_TIME, GridEngine, Position
 
 IST = ZoneInfo("Asia/Kolkata")
 
@@ -37,7 +37,7 @@ LATE_ENTRY_CUTOFF = time(14, 30)
 # long since moved away from, and it would likely just never fill.
 NEAR_OPEN_WINDOW_MINUTES = 5
 
-CONFIRM_PHRASE = "I CONFIRM LIVE TRADING WITH REAL MONEY"
+CONFIRM_PHRASE = "CONFIRM"
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 # Deliberately a SEPARATE file from shadow.py's todays_stocks.json -- the two
@@ -89,6 +89,102 @@ def _quantity_for(exposure: float, price: float) -> int:
     return max(0, math.floor(exposure / price))
 
 
+def _reconcile_open_positions(
+    kite,
+    engine: GridEngine,
+    symbol_atr: dict[str, float],
+    real_qty: dict[str, int],
+    entered_today: set[str],
+    logger: "LiveLogger",
+) -> None:
+    """Adopt any real MIS position already open on Kite into the engine's
+    bookkeeping, instead of assuming a flat book. Without this, restarting
+    the script after a crash (or any interruption) mid-day would leave a
+    real position completely unmonitored -- no loss-cap check, no trailing
+    stop, no square-off -- until a human notices and closes it manually,
+    which is exactly what happened on 2026-08-18.
+
+    Reconstructs each position's entry leg(s) from today's actual completed
+    orders (kite.orders() only returns the current trading day, which is
+    exactly the window this needs) rather than trusting a single blended
+    average, so averaging state (units_used, capital_units_available) stays
+    correct. If reconstruction doesn't cleanly match the live net quantity,
+    refuses to guess and instead halts monitoring for that symbol with a
+    CRITICAL -- a wrong adopted state (e.g. wrong avg_price) is worse than
+    no automated monitoring at all, since it could not just miss the true
+    loss cap but confidently, silently miscalculate it.
+    """
+    try:
+        positions = kite.positions()
+    except orders.PLACEMENT_EXCEPTIONS as exc:
+        logger.critical(
+            f"Could not fetch existing positions from Kite to reconcile at startup: {exc}. If a real position "
+            "is already open from a previous run, it will NOT be monitored until this is resolved -- check Kite directly.",
+            error=str(exc),
+        )
+        return
+
+    day_positions = [p for p in positions.get("day", []) if p.get("product") == "MIS" and p.get("quantity", 0) != 0]
+    if not day_positions:
+        return
+
+    try:
+        today_orders = kite.orders()
+    except orders.PLACEMENT_EXCEPTIONS as exc:
+        logger.critical(
+            f"Found {len(day_positions)} open real MIS position(s) from a previous run today, but could not fetch "
+            f"order history to reconstruct them: {exc}. These positions exist on Kite but will NOT be monitored "
+            "by this session. Check Kite directly.",
+            symbols=[p["tradingsymbol"] for p in day_positions],
+        )
+        return
+
+    for p in day_positions:
+        symbol = p["tradingsymbol"]
+        net_qty = p["quantity"]
+        direction = "long" if net_qty > 0 else "short"
+        entry_side = "BUY" if direction == "long" else "SELL"
+        matching = sorted(
+            (
+                o
+                for o in today_orders
+                if o.get("tradingsymbol") == symbol
+                and o.get("product") == "MIS"
+                and o.get("transaction_type") == entry_side
+                and o.get("status") == "COMPLETE"
+            ),
+            key=lambda o: o.get("order_timestamp") or "",
+        )
+        legs = [(o["average_price"], o["filled_quantity"]) for o in matching]
+        total_leg_qty = sum(q for _, q in legs)
+        if not legs or total_leg_qty != abs(net_qty):
+            logger.critical(
+                f"{symbol} has an open real position (net qty={net_qty}) from a previous run, but reconstructing "
+                f"its entry legs from today's order history didn't cleanly match (found {total_leg_qty} shares "
+                f"across {len(legs)} order(s), expected {abs(net_qty)}). Refusing to guess -- this position will "
+                "NOT be monitored by this session. Check Kite directly and consider closing it manually.",
+                symbol=symbol,
+                net_qty=net_qty,
+                reconstructed_legs=legs,
+            )
+            continue
+
+        if symbol not in symbol_atr:
+            symbol_atr.update(kite_data.fetch_symbol_atr([symbol]))
+
+        entry_time = matching[0].get("order_timestamp") or _now()
+        engine.open_positions[symbol] = Position(
+            symbol=symbol, direction=direction, entry_time=entry_time, legs=legs, atr=symbol_atr.get(symbol), averaged=len(legs) > 1
+        )
+        engine.capital_units_available -= len(legs)
+        real_qty[symbol] = abs(net_qty)
+        entered_today.add(symbol)
+        avg_price = engine.open_positions[symbol].avg_price
+        logger.event(
+            "position_reconciled", symbol=symbol, direction=direction, avg_price=avg_price, qty=abs(net_qty), legs=legs
+        )
+
+
 def _confirm_or_abort(plan: dict[str, str], engine: GridEngine) -> bool:
     print("=" * 70)
     print("LIVE TRADING MODE -- THIS WILL PLACE REAL ORDERS WITH REAL MONEY")
@@ -97,6 +193,10 @@ def _confirm_or_abort(plan: dict[str, str], engine: GridEngine) -> bool:
     print(f"Margin capital: Rs {MARGIN_CAPITAL:,}  |  Exposure per unit: Rs {engine.exposure_per_unit:,.2f}")
     atr_desc = f"{engine.atr_multiplier}x" if engine.atr_multiplier is not None else "off (fixed %)"
     print(f"Daily loss cap: Rs {engine.daily_loss_cap:,}  |  Grid: {engine.grid_pct:.1%}  |  ATR trail: {atr_desc}")
+    if engine.open_positions:
+        print(f"\nRECONCILED {len(engine.open_positions)} existing real position(s) from a previous run today:")
+        for sym, pos in engine.open_positions.items():
+            print(f"  {sym}: {pos.direction} qty={pos.qty:.0f} avg_price={pos.avg_price:.2f} legs={pos.units_used}")
     print()
     typed = input(f'Type exactly "{CONFIRM_PHRASE}" to proceed, anything else aborts: ')
     if typed.strip() != CONFIRM_PHRASE:
@@ -143,9 +243,6 @@ def run_live(poll_interval: int = POLL_INTERVAL_SECONDS) -> None:
     symbol_atr = kite_data.fetch_symbol_atr(list(plan.keys()))
     engine = GridEngine(atr_multiplier=DEFAULT_ATR_MULTIPLIER)
 
-    if not _confirm_or_abort(plan, engine):
-        return
-
     entered_today: set[str] = set()
     # Authoritative record of REAL whole shares actually held per symbol,
     # confirmed from Kite fills -- never trust GridEngine's own internal qty
@@ -153,6 +250,12 @@ def run_live(poll_interval: int = POLL_INTERVAL_SECONDS) -> None:
     # engine's qty is fine for its own P&L bookkeeping; real order quantities
     # must come from here.
     real_qty: dict[str, int] = {}
+
+    _reconcile_open_positions(kite, engine, symbol_atr, real_qty, entered_today, logger)
+
+    if not _confirm_or_abort(plan, engine):
+        return
+
     logger.event(
         "start", plan=plan, grid_pct=engine.grid_pct, exposure_per_unit=engine.exposure_per_unit, symbol_atr=symbol_atr
     )
