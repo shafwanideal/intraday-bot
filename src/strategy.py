@@ -111,6 +111,7 @@ class GridEngine:
         trail_pct: float | None = None,
         atr_multiplier: float | None = None,
         trail_grace_minutes: float = 0,
+        lock_in_profit: bool = True,
     ):
         self.grid_pct = grid_pct
         self.apply_costs = apply_costs
@@ -123,6 +124,7 @@ class GridEngine:
         self.trail_pct = trail_pct if trail_pct is not None else grid_pct / 2
         self.atr_multiplier = atr_multiplier  # if set, trail distance = atr_multiplier * position's ATR (price units) instead of trail_pct
         self.trail_grace_minutes = trail_grace_minutes  # no trailing-stop exit allowed this long after trailing activates
+        self.lock_in_profit = lock_in_profit  # once trailing arms, stop level can't fall back below the grid_pct profit floor
         self.capital_units_available = TOTAL_UNITS
         self.open_positions: dict[str, Position] = {}
         self.daily_pnl = 0.0
@@ -186,18 +188,26 @@ class GridEngine:
 
         if pos.trailing:
             use_atr = self.atr_multiplier is not None and pos.atr is not None
+            # Pure peak-relative trailing can still let a position fall back below
+            # entry: if the pullback from peak exceeds the (smaller) gap between
+            # peak and entry, the trail fires below breakeven even though the
+            # position was genuinely up grid_pct at some point. lock_price is the
+            # floor that prevents that -- once armed, the effective stop can only
+            # ratchet UP toward the peak, never back down past the level that
+            # locks in the original grid_pct move.
+            lock_price = (
+                pos.avg_price * (1 + self.grid_pct) if pos.direction == "long" else pos.avg_price * (1 - self.grid_pct)
+            )
             if pos.direction == "long":
                 pos.peak_price = max(pos.peak_price, price)
-                if use_atr:
-                    triggered = (pos.peak_price - price) >= self.atr_multiplier * pos.atr
-                else:
-                    triggered = (pos.peak_price - price) / pos.peak_price >= self.trail_pct
+                trail_level = pos.peak_price - self.atr_multiplier * pos.atr if use_atr else pos.peak_price * (1 - self.trail_pct)
+                stop_level = max(trail_level, lock_price) if self.lock_in_profit else trail_level
+                triggered = price <= stop_level
             else:
                 pos.peak_price = min(pos.peak_price, price)
-                if use_atr:
-                    triggered = (price - pos.peak_price) >= self.atr_multiplier * pos.atr
-                else:
-                    triggered = (price - pos.peak_price) / pos.peak_price >= self.trail_pct
+                trail_level = pos.peak_price + self.atr_multiplier * pos.atr if use_atr else pos.peak_price * (1 + self.trail_pct)
+                stop_level = min(trail_level, lock_price) if self.lock_in_profit else trail_level
+                triggered = price >= stop_level
             in_grace = (
                 self.trail_grace_minutes > 0
                 and pos.trailing_activated_at is not None
