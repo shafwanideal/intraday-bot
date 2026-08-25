@@ -14,7 +14,7 @@ from . import auth, kite_data
 # session. Over a 6-hour polling loop, a transient network hiccup is not a
 # rare edge case, it's close to guaranteed to happen at least once.
 POLL_EXCEPTIONS = (KiteException, requests.exceptions.RequestException)
-from .strategy import DEFAULT_ATR_MULTIPLIER, MARGIN_CAPITAL, SQUARE_OFF_TIME, GridEngine
+from .strategy import DEFAULT_ATR_MULTIPLIER, MARGIN_CAPITAL, MAX_STOCKS_PER_DAY, SQUARE_OFF_TIME, GridEngine
 
 # NSE trades on IST wall-clock time regardless of what timezone the machine
 # running this script is set to (e.g. a VPS defaulting to UTC or the host's
@@ -61,9 +61,9 @@ def load_todays_plan() -> dict[str, str]:
         plan = json.load(f)
     if not plan:
         raise RuntimeError(f"{TODAYS_STOCKS_FILE} is empty -- add at least one symbol.")
-    if len(plan) > 3:
+    if len(plan) > MAX_STOCKS_PER_DAY:
         raise RuntimeError(
-            f"{TODAYS_STOCKS_FILE} has {len(plan)} symbols but max concurrent positions is 3. Trim the list."
+            f"{TODAYS_STOCKS_FILE} has {len(plan)} symbols but the max is {MAX_STOCKS_PER_DAY}. Trim the list."
         )
     for symbol, direction in plan.items():
         if direction not in ("long", "short"):
@@ -106,7 +106,14 @@ def run_shadow(poll_interval: int = POLL_INTERVAL_SECONDS) -> None:
     logger = ShadowLogger(LOG_DIR / f"shadow_{today.isoformat()}.jsonl")
     symbol_atr = kite_data.fetch_symbol_atr(list(plan.keys()))
     margin_capital = _fetch_margin_capital(kite)
-    engine = GridEngine(margin_capital=margin_capital, atr_multiplier=DEFAULT_ATR_MULTIPLIER)
+    max_concurrent_positions = max(len(plan), 1)
+    total_units = max_concurrent_positions + 1
+    engine = GridEngine(
+        margin_capital=margin_capital,
+        atr_multiplier=DEFAULT_ATR_MULTIPLIER,
+        max_concurrent_positions=max_concurrent_positions,
+        total_units=total_units,
+    )
     entered_today: set[str] = set()
 
     print(f"SHADOW MODE (paper trading, no real orders) -- {today}")

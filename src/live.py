@@ -9,7 +9,7 @@ import requests
 from kiteconnect.exceptions import KiteException
 
 from . import auth, config, kite_data, orders
-from .strategy import DEFAULT_ATR_MULTIPLIER, MARGIN_CAPITAL, SQUARE_OFF_TIME, GridEngine, Position
+from .strategy import DEFAULT_ATR_MULTIPLIER, MARGIN_CAPITAL, MAX_STOCKS_PER_DAY, SQUARE_OFF_TIME, GridEngine, Position
 
 IST = ZoneInfo("Asia/Kolkata")
 
@@ -90,8 +90,8 @@ def _load_todays_plan() -> dict[str, str]:
         plan = json.load(f)
     if not plan:
         raise RuntimeError(f"{TODAYS_STOCKS_FILE} is empty.")
-    if len(plan) > 3:
-        raise RuntimeError(f"{TODAYS_STOCKS_FILE} has {len(plan)} symbols but max concurrent positions is 3.")
+    if len(plan) > MAX_STOCKS_PER_DAY:
+        raise RuntimeError(f"{TODAYS_STOCKS_FILE} has {len(plan)} symbols but the max is {MAX_STOCKS_PER_DAY}.")
     for symbol, direction in plan.items():
         if direction not in ("long", "short"):
             raise RuntimeError(f"Invalid direction '{direction}' for {symbol}.")
@@ -298,7 +298,17 @@ def run_live(poll_interval: int = POLL_INTERVAL_SECONDS) -> None:
     logger = LiveLogger(LOG_DIR / f"live_{today.isoformat()}.jsonl")
     symbol_atr = kite_data.fetch_symbol_atr(list(plan.keys()))
     margin_capital = _fetch_margin_capital(kite)
-    engine = GridEngine(margin_capital=margin_capital, atr_multiplier=DEFAULT_ATR_MULTIPLIER)
+    # Capital splits across however many stocks are actually given today, not a fixed
+    # 3/4 -- one unit per stock plus one spare unit (shared across all of them) for a
+    # single averaging leg, same ratio the original 3-stock/4-unit design used.
+    max_concurrent_positions = max(len(plan), 1)
+    total_units = max_concurrent_positions + 1
+    engine = GridEngine(
+        margin_capital=margin_capital,
+        atr_multiplier=DEFAULT_ATR_MULTIPLIER,
+        max_concurrent_positions=max_concurrent_positions,
+        total_units=total_units,
+    )
 
     entered_today: set[str] = set()
     # Authoritative record of REAL whole shares actually held per symbol,

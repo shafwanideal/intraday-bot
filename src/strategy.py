@@ -6,7 +6,11 @@ MARGIN_CAPITAL = 50_000  # DEFAULT/fallback only -- live.py and shadow.py size o
 TOTAL_UNITS = 4
 MARGIN_PER_UNIT = MARGIN_CAPITAL / TOTAL_UNITS  # 12,500
 LEVERAGE = 5  # Zerodha MIS intraday leverage on equity; varies per stock in reality
-MAX_CONCURRENT_POSITIONS = 3
+MAX_CONCURRENT_POSITIONS = 3  # DEFAULT/fallback -- live.py and shadow.py now size this off
+# the actual number of stocks given each day instead (see GridEngine's max_concurrent_positions
+# and total_units params below); this is what backtest.py uses.
+MAX_STOCKS_PER_DAY = 6  # hard ceiling -- beyond this, per-stock capital gets too thin and
+# per-order costs eat a disproportionate share of a smaller position
 GRID_PCT = 0.015  # revised from 2% on 2026-08-25 -- see grid_pct_and_costs memory for the backtest comparison
 DAILY_LOSS_CAP = 10_000  # raised from Rs 5,000 -- see grid_pct_and_costs memory for the tradeoff
 # Kept as a ratio (not a flat Rs figure) so a different real capital amount scales the
@@ -112,11 +116,15 @@ class GridEngine:
         atr_multiplier: float | None = None,
         trail_grace_minutes: float = 0,
         lock_in_profit: bool = True,
+        total_units: int = TOTAL_UNITS,
+        max_concurrent_positions: int = MAX_CONCURRENT_POSITIONS,
     ):
         self.grid_pct = grid_pct
         self.apply_costs = apply_costs
         self.margin_capital = margin_capital
-        self.exposure_per_unit = (margin_capital / TOTAL_UNITS) * leverage
+        self.total_units = total_units
+        self.max_concurrent_positions = max_concurrent_positions
+        self.exposure_per_unit = (margin_capital / total_units) * leverage
         # None means "not explicitly overridden" -- derive from margin_capital so the
         # cap scales with real capital instead of staying pinned to the Rs 50,000 default.
         self.daily_loss_cap = daily_loss_cap if daily_loss_cap is not None else margin_capital * DAILY_LOSS_CAP_PCT
@@ -125,7 +133,7 @@ class GridEngine:
         self.atr_multiplier = atr_multiplier  # if set, trail distance = atr_multiplier * position's ATR (price units) instead of trail_pct
         self.trail_grace_minutes = trail_grace_minutes  # no trailing-stop exit allowed this long after trailing activates
         self.lock_in_profit = lock_in_profit  # once trailing arms, stop level can't fall back below the grid_pct profit floor
-        self.capital_units_available = TOTAL_UNITS
+        self.capital_units_available = total_units
         self.open_positions: dict[str, Position] = {}
         self.daily_pnl = 0.0
         self.halted = False
@@ -135,7 +143,7 @@ class GridEngine:
         return (
             not self.halted
             and symbol not in self.open_positions
-            and len(self.open_positions) < MAX_CONCURRENT_POSITIONS
+            and len(self.open_positions) < self.max_concurrent_positions
             and self.capital_units_available >= 1
         )
 
