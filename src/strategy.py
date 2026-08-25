@@ -9,8 +9,10 @@ LEVERAGE = 5  # Zerodha MIS intraday leverage on equity; varies per stock in rea
 MAX_CONCURRENT_POSITIONS = 3  # DEFAULT/fallback -- live.py and shadow.py now size this off
 # the actual number of stocks given each day instead (see GridEngine's max_concurrent_positions
 # and total_units params below); this is what backtest.py uses.
-MAX_STOCKS_PER_DAY = 6  # hard ceiling -- beyond this, per-stock capital gets too thin and
-# per-order costs eat a disproportionate share of a smaller position
+MAX_STOCKS_PER_DAY = 20  # sanity ceiling to catch a typo/fat-fingered plan file, not a real
+# business limit -- capital splits evenly across however many stocks are actually given, so
+# there's no fixed cap tied to a specific capital amount; just be aware that more stocks
+# means thinner per-stock capital, and per-order costs eat a bigger share of a smaller position
 GRID_PCT = 0.015  # revised from 2% on 2026-08-25 -- see grid_pct_and_costs memory for the backtest comparison
 DAILY_LOSS_CAP = 10_000  # raised from Rs 5,000 -- see grid_pct_and_costs memory for the tradeoff
 # Kept as a ratio (not a flat Rs figure) so a different real capital amount scales the
