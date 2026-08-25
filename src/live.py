@@ -185,6 +185,48 @@ def _reconcile_open_positions(
         )
 
 
+def _detect_manual_closes(kite, engine: GridEngine, real_qty: dict[str, int], logger: "LiveLogger") -> None:
+    """Our own bookkeeping only reflects orders THIS session placed -- it has
+    no way to know if a position got closed (or changed) manually via the
+    Kite app/website instead of through the bot's own exit logic, which is
+    exactly what happened on 2026-08-24 (a manual close left the engine
+    still believing a position was open for over an hour after it was
+    actually flat).
+
+    Unlike _reconcile_open_positions (startup only), this runs every poll,
+    treating Kite's real position as the only source of truth. If it no
+    longer matches what we expect, the position is dropped from tracking
+    immediately -- the alternative (trusting stale internal state) risks the
+    engine eventually placing its own real exit order against a position
+    that no longer exists, which could open an accidental new real position
+    in the opposite direction.
+    """
+    if not engine.open_positions:
+        return
+    try:
+        real_positions = {p["tradingsymbol"]: p["quantity"] for p in kite.positions().get("day", []) if p.get("product") == "MIS"}
+    except orders.PLACEMENT_EXCEPTIONS as exc:
+        logger.event("manual_close_check_failed", error=str(exc))
+        return
+
+    for symbol in list(engine.open_positions.keys()):
+        pos = engine.open_positions[symbol]
+        expected_qty = real_qty.get(symbol, 0)
+        expected_signed = expected_qty if pos.direction == "long" else -expected_qty
+        actual_signed = real_positions.get(symbol, 0)
+        if actual_signed != expected_signed:
+            logger.critical(
+                f"{symbol} real Kite position (net qty={actual_signed}) no longer matches what this session "
+                f"expects (net qty={expected_signed}) -- most likely closed or modified manually outside the "
+                "bot. Dropping it from automated tracking now so no phantom exit order gets placed against it.",
+                symbol=symbol,
+                expected=expected_signed,
+                actual=actual_signed,
+            )
+            del engine.open_positions[symbol]
+            real_qty.pop(symbol, None)
+
+
 def _confirm_or_abort(plan: dict[str, str], engine: GridEngine) -> bool:
     print("=" * 70)
     print("LIVE TRADING MODE -- THIS WILL PLACE REAL ORDERS WITH REAL MONEY")
@@ -337,6 +379,8 @@ def run_live(poll_interval: int = POLL_INTERVAL_SECONDS) -> None:
                 logger.event("poll_error", error=str(exc))
                 time_module.sleep(poll_interval)
                 continue
+
+            _detect_manual_closes(kite, engine, real_qty, logger)
 
             current_prices: dict[str, float] = {}
             for symbol in watch_symbols:
