@@ -1,13 +1,18 @@
 from dataclasses import dataclass, field
 from datetime import time, timedelta
 
-MARGIN_CAPITAL = 50_000  # real cash at risk; the daily loss cap and 4-unit slots are against this
+MARGIN_CAPITAL = 50_000  # DEFAULT/fallback only -- live.py and shadow.py size off the
+# account's actual available cash each day instead; this is what backtests use.
 TOTAL_UNITS = 4
 MARGIN_PER_UNIT = MARGIN_CAPITAL / TOTAL_UNITS  # 12,500
 LEVERAGE = 5  # Zerodha MIS intraday leverage on equity; varies per stock in reality
 MAX_CONCURRENT_POSITIONS = 3
 GRID_PCT = 0.02
 DAILY_LOSS_CAP = 10_000  # raised from Rs 5,000 -- see grid_pct_and_costs memory for the tradeoff
+# Kept as a ratio (not a flat Rs figure) so a different real capital amount scales the
+# loss cap proportionally instead of silently keeping (or losing) the Rs 50,000 sizing
+# this was actually calibrated against.
+DAILY_LOSS_CAP_PCT = DAILY_LOSS_CAP / MARGIN_CAPITAL  # 0.20
 SQUARE_OFF_TIME = time(15, 15)
 DEFAULT_ATR_MULTIPLIER = 1.0  # trail distance = this * symbol's 14-day ATR
 # Raised from 0.5 (2026-08-15) after user's actual picks (catalyst/earnings-driven,
@@ -96,8 +101,9 @@ class GridEngine:
         self,
         grid_pct: float = GRID_PCT,
         apply_costs: bool = True,
+        margin_capital: float = MARGIN_CAPITAL,
         leverage: float = LEVERAGE,
-        daily_loss_cap: float = DAILY_LOSS_CAP,
+        daily_loss_cap: float | None = None,
         trail_stop: bool = True,
         trail_pct: float | None = None,
         atr_multiplier: float | None = None,
@@ -105,8 +111,11 @@ class GridEngine:
     ):
         self.grid_pct = grid_pct
         self.apply_costs = apply_costs
-        self.exposure_per_unit = MARGIN_PER_UNIT * leverage
-        self.daily_loss_cap = daily_loss_cap
+        self.margin_capital = margin_capital
+        self.exposure_per_unit = (margin_capital / TOTAL_UNITS) * leverage
+        # None means "not explicitly overridden" -- derive from margin_capital so the
+        # cap scales with real capital instead of staying pinned to the Rs 50,000 default.
+        self.daily_loss_cap = daily_loss_cap if daily_loss_cap is not None else margin_capital * DAILY_LOSS_CAP_PCT
         self.trail_stop = trail_stop
         self.trail_pct = trail_pct if trail_pct is not None else grid_pct / 2
         self.atr_multiplier = atr_multiplier  # if set, trail distance = atr_multiplier * position's ATR (price units) instead of trail_pct

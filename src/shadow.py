@@ -14,7 +14,7 @@ from . import auth, kite_data
 # session. Over a 6-hour polling loop, a transient network hiccup is not a
 # rare edge case, it's close to guaranteed to happen at least once.
 POLL_EXCEPTIONS = (KiteException, requests.exceptions.RequestException)
-from .strategy import DEFAULT_ATR_MULTIPLIER, SQUARE_OFF_TIME, GridEngine
+from .strategy import DEFAULT_ATR_MULTIPLIER, MARGIN_CAPITAL, SQUARE_OFF_TIME, GridEngine
 
 # NSE trades on IST wall-clock time regardless of what timezone the machine
 # running this script is set to (e.g. a VPS defaulting to UTC or the host's
@@ -37,6 +37,18 @@ LATE_ENTRY_CUTOFF = time(14, 30)  # don't take new entries this close to square-
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 TODAYS_STOCKS_FILE = PROJECT_ROOT / "todays_stocks.json"
 LOG_DIR = PROJECT_ROOT / "logs"
+
+
+def _fetch_margin_capital(kite) -> float:
+    """Paper-trade sizing should mirror live.py's real sizing (actual
+    available cash), not the fixed default -- otherwise shadow-mode P&L
+    isn't a realistic preview of what a live session would actually do."""
+    try:
+        cash = kite.margins()["equity"]["available"]["cash"]
+        return float(cash)
+    except (KeyError, TypeError, *POLL_EXCEPTIONS) as exc:
+        print(f"WARNING: could not fetch live margin balance ({exc}); falling back to default Rs {MARGIN_CAPITAL:,}")
+        return MARGIN_CAPITAL
 
 
 def load_todays_plan() -> dict[str, str]:
@@ -93,15 +105,24 @@ def run_shadow(poll_interval: int = POLL_INTERVAL_SECONDS) -> None:
     today = _now().date()
     logger = ShadowLogger(LOG_DIR / f"shadow_{today.isoformat()}.jsonl")
     symbol_atr = kite_data.fetch_symbol_atr(list(plan.keys()))
-    engine = GridEngine(atr_multiplier=DEFAULT_ATR_MULTIPLIER)
+    margin_capital = _fetch_margin_capital(kite)
+    engine = GridEngine(margin_capital=margin_capital, atr_multiplier=DEFAULT_ATR_MULTIPLIER)
     entered_today: set[str] = set()
 
     print(f"SHADOW MODE (paper trading, no real orders) -- {today}")
     print(f"Plan: {plan}")
+    print(f"Margin capital (live, from Kite): Rs {margin_capital:,.2f}  |  Exposure per unit: Rs {engine.exposure_per_unit:,.2f}")
+    print(f"Daily loss cap: Rs {engine.daily_loss_cap:,.2f}")
     print(f"ATR (14d): {symbol_atr}")
     print(f"Log: {logger.log_path}\n")
     logger.event(
-        "start", plan=plan, grid_pct=engine.grid_pct, exposure_per_unit=engine.exposure_per_unit, symbol_atr=symbol_atr
+        "start",
+        plan=plan,
+        grid_pct=engine.grid_pct,
+        margin_capital=margin_capital,
+        exposure_per_unit=engine.exposure_per_unit,
+        daily_loss_cap=engine.daily_loss_cap,
+        symbol_atr=symbol_atr,
     )
 
     try:

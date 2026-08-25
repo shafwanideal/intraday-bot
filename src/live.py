@@ -69,6 +69,20 @@ class LiveLogger:
         self.event("CRITICAL", message=message, **fields)
 
 
+def _fetch_margin_capital(kite) -> float:
+    """Size the day's trading off the account's actual available cash rather
+    than the fixed MARGIN_CAPITAL default -- so depositing more (or less)
+    automatically changes position sizing without a code edit. Falls back to
+    the default if the margins call fails, rather than blocking a live
+    session over a transient API issue."""
+    try:
+        cash = kite.margins()["equity"]["available"]["cash"]
+        return float(cash)
+    except (KeyError, TypeError, orders.PLACEMENT_EXCEPTIONS) as exc:
+        print(f"WARNING: could not fetch live margin balance ({exc}); falling back to default Rs {MARGIN_CAPITAL:,}")
+        return MARGIN_CAPITAL
+
+
 def _load_todays_plan() -> dict[str, str]:
     if not TODAYS_STOCKS_FILE.exists():
         raise RuntimeError(f"{TODAYS_STOCKS_FILE} not found.")
@@ -232,9 +246,9 @@ def _confirm_or_abort(plan: dict[str, str], engine: GridEngine) -> bool:
     print("LIVE TRADING MODE -- THIS WILL PLACE REAL ORDERS WITH REAL MONEY")
     print("=" * 70)
     print(f"Today's plan: {plan}")
-    print(f"Margin capital: Rs {MARGIN_CAPITAL:,}  |  Exposure per unit: Rs {engine.exposure_per_unit:,.2f}")
+    print(f"Margin capital (live, from Kite): Rs {engine.margin_capital:,.2f}  |  Exposure per unit: Rs {engine.exposure_per_unit:,.2f}")
     atr_desc = f"{engine.atr_multiplier}x" if engine.atr_multiplier is not None else "off (fixed %)"
-    print(f"Daily loss cap: Rs {engine.daily_loss_cap:,}  |  Grid: {engine.grid_pct:.1%}  |  ATR trail: {atr_desc}")
+    print(f"Daily loss cap: Rs {engine.daily_loss_cap:,.2f}  |  Grid: {engine.grid_pct:.1%}  |  ATR trail: {atr_desc}")
     if engine.open_positions:
         print(f"\nRECONCILED {len(engine.open_positions)} existing real position(s) from a previous run today:")
         for sym, pos in engine.open_positions.items():
@@ -283,7 +297,8 @@ def run_live(poll_interval: int = POLL_INTERVAL_SECONDS) -> None:
     today = _now().date()
     logger = LiveLogger(LOG_DIR / f"live_{today.isoformat()}.jsonl")
     symbol_atr = kite_data.fetch_symbol_atr(list(plan.keys()))
-    engine = GridEngine(atr_multiplier=DEFAULT_ATR_MULTIPLIER)
+    margin_capital = _fetch_margin_capital(kite)
+    engine = GridEngine(margin_capital=margin_capital, atr_multiplier=DEFAULT_ATR_MULTIPLIER)
 
     entered_today: set[str] = set()
     # Authoritative record of REAL whole shares actually held per symbol,
