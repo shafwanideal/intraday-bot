@@ -14,11 +14,14 @@ DAILY_LOSS_CAP = 10_000  # raised from Rs 5,000 -- see grid_pct_and_costs memory
 # this was actually calibrated against.
 DAILY_LOSS_CAP_PCT = DAILY_LOSS_CAP / MARGIN_CAPITAL  # 0.20
 SQUARE_OFF_TIME = time(15, 12)  # moved earlier from 15:15 on 2026-08-25 -- close out ahead of the exchange's own cutoff, don't cut it close
-DEFAULT_ATR_MULTIPLIER = 1.0  # trail distance = this * symbol's 14-day ATR
-# Raised from 0.5 (2026-08-15) after user's actual picks (catalyst/earnings-driven,
-# often gap-and-go at open) showed 1.0x beating 0.5x by 24% on 34 real trade cases,
-# even though 0.5x is still better on calmer generic large caps -- see
-# grid_pct_and_costs memory for the full comparison and reasoning.
+DEFAULT_ATR_MULTIPLIER = 0.5  # trail distance = this * symbol's 14-day ATR
+# Lowered back to 0.5 on 2026-08-25, reversing the 2026-08-15 change to 1.0x.
+# Retested against the (now 1.5%, was 2%) grid activation threshold on the
+# accumulated real-day backtest: 0.5x beat 1.0x on avg P&L/day (Rs 2,855 vs
+# Rs 2,126), win rate (75% vs 58%) and win days (5/6 vs 4/6), with no worse
+# worst-day. Caveat: only 6 real trading days in this comparison, versus 34
+# trade cases behind the original 1.0x decision -- see grid_pct_and_costs
+# memory for both comparisons; worth re-checking again once more days exist.
 
 # Zerodha intraday equity (non-delivery) charges, applied per order.
 BROKERAGE_RATE = 0.0003  # 0.03%, capped at Rs 20/order
