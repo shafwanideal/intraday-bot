@@ -7,13 +7,13 @@ TOTAL_UNITS = 4
 MARGIN_PER_UNIT = MARGIN_CAPITAL / TOTAL_UNITS  # 12,500
 LEVERAGE = 5  # Zerodha MIS intraday leverage on equity; varies per stock in reality
 MAX_CONCURRENT_POSITIONS = 3
-GRID_PCT = 0.02
+GRID_PCT = 0.015  # revised from 2% on 2026-08-25 -- see grid_pct_and_costs memory for the backtest comparison
 DAILY_LOSS_CAP = 10_000  # raised from Rs 5,000 -- see grid_pct_and_costs memory for the tradeoff
 # Kept as a ratio (not a flat Rs figure) so a different real capital amount scales the
 # loss cap proportionally instead of silently keeping (or losing) the Rs 50,000 sizing
 # this was actually calibrated against.
 DAILY_LOSS_CAP_PCT = DAILY_LOSS_CAP / MARGIN_CAPITAL  # 0.20
-SQUARE_OFF_TIME = time(15, 15)
+SQUARE_OFF_TIME = time(15, 12)  # moved earlier from 15:15 on 2026-08-25 -- close out ahead of the exchange's own cutoff, don't cut it close
 DEFAULT_ATR_MULTIPLIER = 1.0  # trail distance = this * symbol's 14-day ATR
 # Raised from 0.5 (2026-08-15) after user's actual picks (catalyst/earnings-driven,
 # often gap-and-go at open) showed 1.0x beating 0.5x by 24% on 34 real trade cases,

@@ -8,7 +8,7 @@ from src import backtest, kite_data
 SYMBOLS = ["ICICIBANK", "HFCL", "CUPID", "TCS", "WIPRO", "INFY"]
 STRONG_CANDIDATES = ["HFCL", "CUPID", "ICICIBANK"]  # best performers so far -- selection-biased, see caveats
 DIRECTIONS: dict[str, str] = {}  # e.g. {"HFCL": "short"} to flag a short for the day
-GRID_PCT = 0.02  # established as better than 1% net of costs
+GRID_PCT = 0.015  # revised from 2% on 2026-08-25
 GOAL_DAILY_PNL = 2_000
 
 CAVEATS = """

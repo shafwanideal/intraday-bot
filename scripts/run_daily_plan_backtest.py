@@ -16,7 +16,7 @@ DAILY_PLAN: dict[date, dict[str, str]] = {
     date(2026, 8, 25): {"IIFL": "short", "HINDCOPPER": "short", "MFSL": "long"},  # IIFL Finance, Hindustan Copper, Max Financial Services
 }
 
-GRID_PCT = 0.02  # established as the better setting net of costs
+GRID_PCT = 0.015  # revised from 2% on 2026-08-25 -- see grid_pct_and_costs memory
 GOAL_DAILY_PNL = 2_000
 
 ALL_SYMBOLS = sorted({sym for day_plan in DAILY_PLAN.values() for sym in day_plan})

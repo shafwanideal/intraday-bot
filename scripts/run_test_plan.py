@@ -15,7 +15,7 @@ DAILY_PLAN: dict[date, dict[str, str]] = {
     date(2026, 8, 14): {"ADANIPORTS": "long", "MOTISONS": "long"},  # Adani Ports, Motisons Jewellers
 }
 
-GRID_PCT = 0.02
+GRID_PCT = 0.015  # revised from 2% on 2026-08-25
 GOAL_DAILY_PNL = 2_000
 
 ALL_SYMBOLS = sorted({sym for day_plan in DAILY_PLAN.values() for sym in day_plan})
