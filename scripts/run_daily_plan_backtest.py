@@ -13,6 +13,7 @@ DAILY_PLAN: dict[date, dict[str, str]] = {
     date(2026, 8, 11): {"BSE": "long", "THYROCARE": "long", "MAHABANK": "long"},  # BSE, Thyrocare, Bank of Maharashtra
     date(2026, 8, 12): {"LENSKART": "long"},
     date(2026, 8, 14): {"LGEINDIA": "long", "WELSPUNLIV": "long", "MANORAMA": "long"},  # LG Electronics India, Welspun Living, Manorama Industries
+    date(2026, 8, 25): {"IIFL": "short", "HINDCOPPER": "short", "MFSL": "long"},  # IIFL Finance, Hindustan Copper, Max Financial Services
 }
 
 GRID_PCT = 0.02  # established as the better setting net of costs
