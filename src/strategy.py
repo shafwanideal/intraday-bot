@@ -14,6 +14,10 @@ MAX_STOCKS_PER_DAY = 20  # sanity ceiling to catch a typo/fat-fingered plan file
 # there's no fixed cap tied to a specific capital amount; just be aware that more stocks
 # means thinner per-stock capital, and per-order costs eat a bigger share of a smaller position
 GRID_PCT = 0.015  # revised from 2% on 2026-08-25 -- see grid_pct_and_costs memory for the backtest comparison
+# Trailing-stop/target activation threshold -- GRID_PCT above.
+AVERAGING_PCT = 0.01  # split off from GRID_PCT on 2026-08-26: averaging now fires on a smaller
+# adverse move (1%) than the profit side needs to arm trailing (1.5%) -- previously both used
+# the same GRID_PCT value.
 DAILY_LOSS_CAP = 10_000  # raised from Rs 5,000 -- see grid_pct_and_costs memory for the tradeoff
 # Kept as a ratio (not a flat Rs figure) so a different real capital amount scales the
 # loss cap proportionally instead of silently keeping (or losing) the Rs 50,000 sizing
@@ -124,8 +128,12 @@ class GridEngine:
         lock_in_profit: bool = True,
         total_units: int = TOTAL_UNITS,
         max_concurrent_positions: int = MAX_CONCURRENT_POSITIONS,
+        averaging_pct: float | None = None,
     ):
         self.grid_pct = grid_pct
+        # None means "not explicitly overridden" -- defaults to grid_pct so existing callers
+        # (e.g. backtest.py) that only pass grid_pct keep their exact prior behavior.
+        self.averaging_pct = averaging_pct if averaging_pct is not None else grid_pct
         self.apply_costs = apply_costs
         self.margin_capital = margin_capital
         self.total_units = total_units
@@ -241,7 +249,7 @@ class GridEngine:
                 return None
             return self._close(symbol, price, "target_exit", timestamp)
 
-        if not pos.averaged and move <= -self.grid_pct and self.capital_units_available >= 1:
+        if not pos.averaged and move <= -self.averaging_pct and self.capital_units_available >= 1:
             qty = self.exposure_per_unit / price
             pos.legs.append((price, qty))
             pos.averaged = True

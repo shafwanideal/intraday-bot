@@ -14,7 +14,7 @@ from . import auth, kite_data
 # session. Over a 6-hour polling loop, a transient network hiccup is not a
 # rare edge case, it's close to guaranteed to happen at least once.
 POLL_EXCEPTIONS = (KiteException, requests.exceptions.RequestException)
-from .strategy import DEFAULT_ATR_MULTIPLIER, MARGIN_CAPITAL, MAX_STOCKS_PER_DAY, SQUARE_OFF_TIME, GridEngine
+from .strategy import AVERAGING_PCT, DEFAULT_ATR_MULTIPLIER, MARGIN_CAPITAL, MAX_STOCKS_PER_DAY, SQUARE_OFF_TIME, GridEngine
 
 # NSE trades on IST wall-clock time regardless of what timezone the machine
 # running this script is set to (e.g. a VPS defaulting to UTC or the host's
@@ -113,6 +113,7 @@ def run_shadow(poll_interval: int = POLL_INTERVAL_SECONDS) -> None:
         atr_multiplier=DEFAULT_ATR_MULTIPLIER,
         max_concurrent_positions=max_concurrent_positions,
         total_units=total_units,
+        averaging_pct=AVERAGING_PCT,
     )
     entered_today: set[str] = set()
 

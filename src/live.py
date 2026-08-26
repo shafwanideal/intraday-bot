@@ -9,7 +9,7 @@ import requests
 from kiteconnect.exceptions import KiteException
 
 from . import auth, config, kite_data, orders
-from .strategy import DEFAULT_ATR_MULTIPLIER, MARGIN_CAPITAL, MAX_STOCKS_PER_DAY, SQUARE_OFF_TIME, GridEngine, Position
+from .strategy import AVERAGING_PCT, DEFAULT_ATR_MULTIPLIER, MARGIN_CAPITAL, MAX_STOCKS_PER_DAY, SQUARE_OFF_TIME, GridEngine, Position
 
 IST = ZoneInfo("Asia/Kolkata")
 
@@ -308,6 +308,7 @@ def run_live(poll_interval: int = POLL_INTERVAL_SECONDS) -> None:
         atr_multiplier=DEFAULT_ATR_MULTIPLIER,
         max_concurrent_positions=max_concurrent_positions,
         total_units=total_units,
+        averaging_pct=AVERAGING_PCT,
     )
 
     entered_today: set[str] = set()
