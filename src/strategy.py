@@ -19,7 +19,11 @@ DAILY_LOSS_CAP = 10_000  # raised from Rs 5,000 -- see grid_pct_and_costs memory
 # loss cap proportionally instead of silently keeping (or losing) the Rs 50,000 sizing
 # this was actually calibrated against.
 DAILY_LOSS_CAP_PCT = DAILY_LOSS_CAP / MARGIN_CAPITAL  # 0.20
-SQUARE_OFF_TIME = time(15, 12)  # moved earlier from 15:15 on 2026-08-25 -- close out ahead of the exchange's own cutoff, don't cut it close
+SQUARE_OFF_TIME = time(15, 8)  # moved earlier from 15:12 on 2026-08-26 -- Kite itself REJECTS MIS orders
+# placed AT or after 15:12 ("Intraday orders (MIS) are allowed only till 3:12 PM"), so a square-off
+# attempt landing exactly at 15:12 is already too late. On 2026-08-26 this happened for real -- all
+# three real square-off orders were rejected, and the positions only closed because Zerodha's own
+# broker-side auto square-off caught them a few minutes later. That's not something to rely on.
 DEFAULT_ATR_MULTIPLIER = 0.5  # trail distance = this * symbol's 14-day ATR
 # Lowered back to 0.5 on 2026-08-25, reversing the 2026-08-15 change to 1.0x.
 # Retested against the (now 1.5%, was 2%) grid activation threshold on the
