@@ -441,6 +441,20 @@ def run_live(poll_interval: int = POLL_INTERVAL_SECONDS) -> None:
                     else:
                         logger.event("entry_failed", symbol=symbol, direction=direction, quantity=quantity, result=result)
 
+            # Log the exact prices this poll is about to act on, for open positions
+            # specifically -- without this, reconstructing what actually happened
+            # between two 15-second polls (e.g. a fast trailing-stop trigger) after
+            # the fact is only ever a best guess from retrospective 1-minute candles,
+            # which don't necessarily match what the live tick feed showed in the
+            # moment. Real gap on 2026-08-27 (FOSECOIND): a trailing exit fired that
+            # looked impossible from the minute-candle data alone, with no way to
+            # confirm what price the engine actually saw.
+            if engine.open_positions:
+                logger.event(
+                    "poll_prices",
+                    prices={sym: current_prices[sym] for sym in engine.open_positions if sym in current_prices},
+                )
+
             # Averaging: detect the transition via before/after state, since
             # GridEngine.update() mutates pos.averaged internally rather than
             # returning it as an event.

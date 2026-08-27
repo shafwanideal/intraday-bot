@@ -199,6 +199,12 @@ def run_shadow(poll_interval: int = POLL_INTERVAL_SECONDS) -> None:
                             late_entry=not is_original,
                         )
 
+            if engine.open_positions:
+                logger.event(
+                    "poll_prices",
+                    prices={sym: current_prices[sym] for sym in engine.open_positions if sym in current_prices},
+                )
+
             for symbol, price in current_prices.items():
                 result = engine.update(symbol, price, _now())
                 if result:
