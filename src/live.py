@@ -12,12 +12,14 @@ from . import auth, config, kite_data, orders
 from .strategy import (
     AVERAGING_PCT,
     DEFAULT_ATR_MULTIPLIER,
-    MARGIN_CAPITAL,
     ENABLE_AVERAGING,
+    LEVERAGE,
     LIVE_CONCURRENT_SLOTS,
+    MARGIN_CAPITAL,
     MAX_STOCKS_PER_DAY,
     PORTFOLIO_PROFIT_LOCK_GIVEBACK,
     PORTFOLIO_PROFIT_LOCK_TRIGGER,
+    PREMARKET_TRANCHE_PCT,
     SQUARE_OFF_TIME,
     GridEngine,
     Position,
@@ -269,12 +271,26 @@ def _detect_manual_closes(kite, engine: GridEngine, real_qty: dict[str, int], lo
             real_qty.pop(symbol, None)
 
 
-def _confirm_or_abort(plan: dict[str, str], engine: GridEngine) -> bool:
+def _confirm_or_abort(
+    plan: dict[str, str],
+    engine: GridEngine,
+    premarket_symbols: set[str],
+    tranche_a_exposure: float,
+    tranche_b_exposure: float,
+) -> bool:
     print("=" * 70)
     print("LIVE TRADING MODE -- THIS WILL PLACE REAL ORDERS WITH REAL MONEY")
     print("=" * 70)
     print(f"Today's plan: {plan}")
-    print(f"Margin capital (live, from Kite): Rs {engine.margin_capital:,.2f}  |  Exposure per unit: Rs {engine.exposure_per_unit:,.2f}")
+    print(f"Margin capital (live, from Kite): Rs {engine.margin_capital:,.2f}")
+    if premarket_symbols:
+        print(
+            f"Tranche A (premarket, {len(premarket_symbols)} stock(s) -- {sorted(premarket_symbols)}): "
+            f"Rs {tranche_a_exposure:,.2f} exposure each"
+        )
+        print(f"Tranche B (anything added after open): Rs {tranche_b_exposure:,.2f} exposure each")
+    else:
+        print(f"No premarket tranche (session starting after market open) -- Rs {tranche_b_exposure:,.2f} exposure each")
     atr_desc = f"{engine.atr_multiplier}x" if engine.atr_multiplier is not None else "off (fixed %)"
     print(f"Daily loss cap: Rs {engine.daily_loss_cap:,.2f}  |  Grid: {engine.grid_pct:.1%}  |  ATR trail: {atr_desc}")
     print(f"Realized P&L today (seeded from Kite): Rs {engine.daily_pnl:,.2f}")
@@ -339,7 +355,26 @@ def run_live(poll_interval: int = POLL_INTERVAL_SECONDS) -> None:
     # target) always has room for a new pick without a restart. See the constant's comment
     # for the sizing tradeoff this implies.
     max_concurrent_positions = LIVE_CONCURRENT_SLOTS
-    total_units = max_concurrent_positions + 1
+    # No spare unit reserved -- that was only ever needed for averaging's second leg, which
+    # is now permanently off (ENABLE_AVERAGING). Reserving it anyway would silently shrink
+    # every position by 1/(slots+1) for a leg that can never fire.
+    total_units = max_concurrent_positions
+
+    # Two-tranche capital split, adopted 2026-08-28: PREMARKET_TRANCHE_PCT of capital goes to
+    # whatever's in the plan before market open (split evenly among them), the rest is held
+    # back for anything added after open (split evenly across the remaining slot capacity).
+    # Smaller per-order size on each half means far less chance of a margin rejection (see
+    # CONCOR, 2026-08-28) than committing the whole day's capital to the first batch. If this
+    # session is starting after market open already (e.g. a restart), there's no "premarket"
+    # tranche left to reserve -- everything from here is tranche B.
+    premarket_symbols = set(plan.keys()) if _now().time() < MARKET_OPEN else set()
+    tranche_a_capital = margin_capital * PREMARKET_TRANCHE_PCT
+    tranche_b_capital = margin_capital * (1 - PREMARKET_TRANCHE_PCT)
+    tranche_a_count = max(len(premarket_symbols), 1)
+    tranche_b_count = max(max_concurrent_positions - len(premarket_symbols), 1)
+    tranche_a_exposure = (tranche_a_capital / tranche_a_count) * LEVERAGE
+    tranche_b_exposure = (tranche_b_capital / tranche_b_count) * LEVERAGE
+
     engine = GridEngine(
         margin_capital=margin_capital,
         atr_multiplier=DEFAULT_ATR_MULTIPLIER,
@@ -368,7 +403,7 @@ def run_live(poll_interval: int = POLL_INTERVAL_SECONDS) -> None:
 
     _reconcile_open_positions(kite, engine, symbol_atr, real_qty, entered_today, logger)
 
-    if not _confirm_or_abort(plan, engine):
+    if not _confirm_or_abort(plan, engine, premarket_symbols, tranche_a_exposure, tranche_b_exposure):
         return
 
     logger.event(
@@ -469,7 +504,8 @@ def run_live(poll_interval: int = POLL_INTERVAL_SECONDS) -> None:
                     ).total_seconds() / 60
                     near_open = 0 <= minutes_since_open <= NEAR_OPEN_WINDOW_MINUTES
                     ref_price = quote["ohlc"]["open"] if near_open else quote["last_price"]
-                    quantity = _quantity_for(engine.exposure_per_unit, ref_price)
+                    exposure = tranche_a_exposure if symbol in premarket_symbols else tranche_b_exposure
+                    quantity = _quantity_for(exposure, ref_price)
                     if quantity < 1:
                         logger.event("entry_skipped_zero_qty", symbol=symbol, ref_price=ref_price)
                         entered_today.add(symbol)  # don't retry every poll for a stock too expensive to size

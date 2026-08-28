@@ -20,6 +20,13 @@ LIVE_CONCURRENT_SLOTS = 10  # requested 2026-08-28: live.py/shadow.py now reserv
 # pick without a restart. Tradeoff: exposure_per_unit is now sized as if up to 10 positions
 # could be open at once even on a day with only 2-3 picks, so each position starts smaller
 # than the old dynamic sizing gave it.
+PREMARKET_TRANCHE_PCT = 0.5  # adopted as the standing default 2026-08-28. Capital is split
+# in two: this fraction is reserved for whatever picks are given BEFORE market open (split
+# evenly among them), and the rest is reserved for anything added after open (split evenly
+# across the remaining LIVE_CONCURRENT_SLOTS capacity). Backtested on 2026-08-28's real
+# picks: this let every stock actually get filled (smaller per-order size means far less
+# chance of a margin rejection like CONCOR hit that day) and roughly matched or beat the
+# single-pool sizing in every trade -- see grid_pct_and_costs memory for the comparison.
 PER_STOCK_STOP_LOSS = 2_000  # turned on as a live default 2026-08-28: closes a single
 # position outright once its own unrealized loss exceeds this, independent of averaging
 # state. Closes exactly the gap that let STARCEMENT ride to square-off (-1996 to -2311

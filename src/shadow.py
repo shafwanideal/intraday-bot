@@ -17,12 +17,14 @@ POLL_EXCEPTIONS = (KiteException, requests.exceptions.RequestException)
 from .strategy import (
     AVERAGING_PCT,
     DEFAULT_ATR_MULTIPLIER,
-    MARGIN_CAPITAL,
     ENABLE_AVERAGING,
+    LEVERAGE,
     LIVE_CONCURRENT_SLOTS,
+    MARGIN_CAPITAL,
     MAX_STOCKS_PER_DAY,
     PORTFOLIO_PROFIT_LOCK_GIVEBACK,
     PORTFOLIO_PROFIT_LOCK_TRIGGER,
+    PREMARKET_TRANCHE_PCT,
     SQUARE_OFF_TIME,
     GridEngine,
 )
@@ -118,7 +120,16 @@ def run_shadow(poll_interval: int = POLL_INTERVAL_SECONDS) -> None:
     symbol_atr = kite_data.fetch_symbol_atr(list(plan.keys()))
     margin_capital = _fetch_margin_capital(kite)
     max_concurrent_positions = LIVE_CONCURRENT_SLOTS
-    total_units = max_concurrent_positions + 1
+    total_units = max_concurrent_positions  # no spare unit -- averaging is permanently off
+
+    premarket_symbols = set(plan.keys()) if _now().time() < MARKET_OPEN else set()
+    tranche_a_capital = margin_capital * PREMARKET_TRANCHE_PCT
+    tranche_b_capital = margin_capital * (1 - PREMARKET_TRANCHE_PCT)
+    tranche_a_count = max(len(premarket_symbols), 1)
+    tranche_b_count = max(max_concurrent_positions - len(premarket_symbols), 1)
+    tranche_a_exposure = (tranche_a_capital / tranche_a_count) * LEVERAGE
+    tranche_b_exposure = (tranche_b_capital / tranche_b_count) * LEVERAGE
+
     engine = GridEngine(
         margin_capital=margin_capital,
         atr_multiplier=DEFAULT_ATR_MULTIPLIER,
@@ -134,7 +145,12 @@ def run_shadow(poll_interval: int = POLL_INTERVAL_SECONDS) -> None:
 
     print(f"SHADOW MODE (paper trading, no real orders) -- {today}")
     print(f"Plan: {plan}")
-    print(f"Margin capital (live, from Kite): Rs {margin_capital:,.2f}  |  Exposure per unit: Rs {engine.exposure_per_unit:,.2f}")
+    print(f"Margin capital (live, from Kite): Rs {margin_capital:,.2f}")
+    if premarket_symbols:
+        print(f"Tranche A (premarket, {sorted(premarket_symbols)}): Rs {tranche_a_exposure:,.2f} each")
+        print(f"Tranche B (added after open): Rs {tranche_b_exposure:,.2f} each")
+    else:
+        print(f"No premarket tranche -- Rs {tranche_b_exposure:,.2f} each")
     print(f"Daily loss cap: Rs {engine.daily_loss_cap:,.2f}")
     print(f"ATR (14d): {symbol_atr}")
     print(f"Log: {logger.log_path}\n")
@@ -203,7 +219,9 @@ def run_shadow(poll_interval: int = POLL_INTERVAL_SECONDS) -> None:
                     direction = plan[symbol]
                     is_original = symbol in original_symbols
                     entry_price = quote["ohlc"]["open"] if is_original else quote["last_price"]
-                    if engine.enter(symbol, entry_price, direction, _now(), atr=symbol_atr.get(symbol)):
+                    exposure = tranche_a_exposure if symbol in premarket_symbols else tranche_b_exposure
+                    quantity = exposure / entry_price
+                    if engine.enter(symbol, entry_price, direction, _now(), atr=symbol_atr.get(symbol), quantity=quantity):
                         entered_today.add(symbol)
                         logger.event(
                             "entry",
