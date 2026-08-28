@@ -18,6 +18,7 @@ from .strategy import (
     AVERAGING_PCT,
     DEFAULT_ATR_MULTIPLIER,
     MARGIN_CAPITAL,
+    LIVE_CONCURRENT_SLOTS,
     MAX_STOCKS_PER_DAY,
     PORTFOLIO_PROFIT_LOCK_GIVEBACK,
     PORTFOLIO_PROFIT_LOCK_TRIGGER,
@@ -115,7 +116,7 @@ def run_shadow(poll_interval: int = POLL_INTERVAL_SECONDS) -> None:
     logger = ShadowLogger(LOG_DIR / f"shadow_{today.isoformat()}.jsonl")
     symbol_atr = kite_data.fetch_symbol_atr(list(plan.keys()))
     margin_capital = _fetch_margin_capital(kite)
-    max_concurrent_positions = max(len(plan), 1)
+    max_concurrent_positions = LIVE_CONCURRENT_SLOTS
     total_units = max_concurrent_positions + 1
     engine = GridEngine(
         margin_capital=margin_capital,

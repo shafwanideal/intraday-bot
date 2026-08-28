@@ -6,13 +6,20 @@ MARGIN_CAPITAL = 50_000  # DEFAULT/fallback only -- live.py and shadow.py size o
 TOTAL_UNITS = 4
 MARGIN_PER_UNIT = MARGIN_CAPITAL / TOTAL_UNITS  # 12,500
 LEVERAGE = 5  # Zerodha MIS intraday leverage on equity; varies per stock in reality
-MAX_CONCURRENT_POSITIONS = 3  # DEFAULT/fallback -- live.py and shadow.py now size this off
-# the actual number of stocks given each day instead (see GridEngine's max_concurrent_positions
-# and total_units params below); this is what backtest.py uses.
+MAX_CONCURRENT_POSITIONS = 3  # DEFAULT/fallback -- this is what backtest.py uses.
 MAX_STOCKS_PER_DAY = 20  # sanity ceiling to catch a typo/fat-fingered plan file, not a real
 # business limit -- capital splits evenly across however many stocks are actually given, so
 # there's no fixed cap tied to a specific capital amount; just be aware that more stocks
 # means thinner per-stock capital, and per-order costs eat a bigger share of a smaller position
+LIVE_CONCURRENT_SLOTS = 10  # requested 2026-08-28: live.py/shadow.py now reserve this many
+# slots from the FIRST confirmation of the day, regardless of how many stocks are actually
+# given at that point -- not sized dynamically off the initial picks count like before. That
+# dynamic sizing meant adding a stock past the original count (CONCOR, ADANIGREEN on
+# 2026-08-28) needed a full session restart just to raise the slot count. Fixing the cap at
+# 10 up front means a slot freeing up (a position hitting target) always has room for a new
+# pick without a restart. Tradeoff: exposure_per_unit is now sized as if up to 10 positions
+# could be open at once even on a day with only 2-3 picks, so each position starts smaller
+# than the old dynamic sizing gave it.
 GRID_PCT = 0.015  # revised from 2% on 2026-08-25 -- see grid_pct_and_costs memory for the backtest comparison
 # Trailing-stop/target activation threshold -- GRID_PCT above.
 AVERAGING_PCT = 0.01  # split off from GRID_PCT on 2026-08-26: averaging now fires on a smaller
@@ -138,6 +145,7 @@ class GridEngine:
         total_units: int = TOTAL_UNITS,
         max_concurrent_positions: int = MAX_CONCURRENT_POSITIONS,
         averaging_pct: float | None = None,
+        enable_averaging: bool = True,
         per_stock_stop_loss: float | None = None,
         portfolio_profit_lock_trigger: float | None = None,
         portfolio_profit_lock_giveback: float | None = None,
@@ -146,6 +154,7 @@ class GridEngine:
         # None means "not explicitly overridden" -- defaults to grid_pct so existing callers
         # (e.g. backtest.py) that only pass grid_pct keep their exact prior behavior.
         self.averaging_pct = averaging_pct if averaging_pct is not None else grid_pct
+        self.enable_averaging = enable_averaging
         self.apply_costs = apply_costs
         self.margin_capital = margin_capital
         self.total_units = total_units
@@ -275,7 +284,7 @@ class GridEngine:
                 return None
             return self._close(symbol, price, "target_exit", timestamp)
 
-        if not pos.averaged and move <= -self.averaging_pct and self.capital_units_available >= 1:
+        if self.enable_averaging and not pos.averaged and move <= -self.averaging_pct and self.capital_units_available >= 1:
             qty = self.exposure_per_unit / price
             pos.legs.append((price, qty))
             pos.averaged = True

@@ -31,6 +31,8 @@ def run_backtest(
     trail_grace_minutes: float = 0,
     per_stock_stop_loss: float | None = None,
     portfolio_profit_lock_trigger: float | None = None,
+    portfolio_profit_lock_giveback: float | None = None,
+    enable_averaging: bool = True,
 ) -> dict:
     """Simulate the grid strategy (see `src.strategy.GridEngine`) against real
     intraday bars, bar by bar.
@@ -93,6 +95,8 @@ def run_backtest(
             trail_grace_minutes=trail_grace_minutes,
             per_stock_stop_loss=per_stock_stop_loss,
             portfolio_profit_lock_trigger=portfolio_profit_lock_trigger,
+            portfolio_profit_lock_giveback=portfolio_profit_lock_giveback,
+            enable_averaging=enable_averaging,
         )
 
         last_known_price: dict[str, float] = {}

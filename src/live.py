@@ -13,6 +13,7 @@ from .strategy import (
     AVERAGING_PCT,
     DEFAULT_ATR_MULTIPLIER,
     MARGIN_CAPITAL,
+    LIVE_CONCURRENT_SLOTS,
     MAX_STOCKS_PER_DAY,
     PORTFOLIO_PROFIT_LOCK_GIVEBACK,
     PORTFOLIO_PROFIT_LOCK_TRIGGER,
@@ -330,10 +331,11 @@ def run_live(poll_interval: int = POLL_INTERVAL_SECONDS) -> None:
     logger = LiveLogger(LOG_DIR / f"live_{today.isoformat()}.jsonl")
     symbol_atr = kite_data.fetch_symbol_atr(list(plan.keys()))
     margin_capital = _fetch_margin_capital(kite)
-    # Capital splits across however many stocks are actually given today, not a fixed
-    # 3/4 -- one unit per stock plus one spare unit (shared across all of them) for a
-    # single averaging leg, same ratio the original 3-stock/4-unit design used.
-    max_concurrent_positions = max(len(plan), 1)
+    # Fixed at LIVE_CONCURRENT_SLOTS from the first confirmation of the day, regardless of
+    # how many stocks are given right now -- so a slot freeing up later (a position hitting
+    # target) always has room for a new pick without a restart. See the constant's comment
+    # for the sizing tradeoff this implies.
+    max_concurrent_positions = LIVE_CONCURRENT_SLOTS
     total_units = max_concurrent_positions + 1
     engine = GridEngine(
         margin_capital=margin_capital,
