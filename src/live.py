@@ -15,6 +15,7 @@ from .strategy import (
     MARGIN_CAPITAL,
     LIVE_CONCURRENT_SLOTS,
     MAX_STOCKS_PER_DAY,
+    PER_STOCK_STOP_LOSS,
     PORTFOLIO_PROFIT_LOCK_GIVEBACK,
     PORTFOLIO_PROFIT_LOCK_TRIGGER,
     SQUARE_OFF_TIME,
@@ -282,6 +283,8 @@ def _confirm_or_abort(plan: dict[str, str], engine: GridEngine) -> bool:
             f"Portfolio profit lock: arms at Rs {engine.portfolio_profit_lock_trigger:,.2f}, "
             f"giveback Rs {engine.portfolio_profit_lock_giveback or 0:,.2f}"
         )
+    if engine.per_stock_stop_loss is not None:
+        print(f"Per-stock stop-loss: Rs {engine.per_stock_stop_loss:,.2f}")
     if engine.open_positions:
         print(f"\nRECONCILED {len(engine.open_positions)} existing real position(s) from a previous run today:")
         for sym, pos in engine.open_positions.items():
@@ -345,6 +348,7 @@ def run_live(poll_interval: int = POLL_INTERVAL_SECONDS) -> None:
         averaging_pct=AVERAGING_PCT,
         portfolio_profit_lock_trigger=PORTFOLIO_PROFIT_LOCK_TRIGGER,
         portfolio_profit_lock_giveback=PORTFOLIO_PROFIT_LOCK_GIVEBACK,
+        per_stock_stop_loss=PER_STOCK_STOP_LOSS,
     )
 
     entered_today: set[str] = set()
@@ -579,6 +583,27 @@ def run_live(poll_interval: int = POLL_INTERVAL_SECONDS) -> None:
                     )
                 else:
                     logger.event("daily_loss_cap_exit", symbol=symbol, price=fill["average_price"], qty=fill["filled_quantity"])
+
+            for result in engine.check_per_stock_stop_loss(current_prices, _now()):
+                symbol = result["symbol"]
+                sell_qty = real_qty.pop(symbol, None)
+                if sell_qty is None:
+                    logger.critical(
+                        f"{symbol} per-stock stop-loss triggered but no real_qty on record. Check Kite directly.",
+                        symbol=symbol,
+                    )
+                    continue
+                transaction_type = "SELL" if result["direction"] == "long" else "BUY"
+                fill = place_and_confirm(symbol, transaction_type, sell_qty, result["exit_price"], tag="per_stock_stop_loss")
+                if fill["status"] != "COMPLETE":
+                    logger.critical(
+                        f"{symbol} per-stock stop-loss exit did NOT confirm filled -- "
+                        "real position may still be open. Check Kite directly and close it manually.",
+                        symbol=symbol,
+                        fill_result=fill,
+                    )
+                else:
+                    logger.event("per_stock_stop_loss_exit", symbol=symbol, price=fill["average_price"], qty=fill["filled_quantity"])
 
             for result in engine.check_portfolio_profit_lock(current_prices, _now()):
                 symbol = result["symbol"]

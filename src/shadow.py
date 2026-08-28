@@ -20,6 +20,7 @@ from .strategy import (
     MARGIN_CAPITAL,
     LIVE_CONCURRENT_SLOTS,
     MAX_STOCKS_PER_DAY,
+    PER_STOCK_STOP_LOSS,
     PORTFOLIO_PROFIT_LOCK_GIVEBACK,
     PORTFOLIO_PROFIT_LOCK_TRIGGER,
     SQUARE_OFF_TIME,
@@ -126,6 +127,7 @@ def run_shadow(poll_interval: int = POLL_INTERVAL_SECONDS) -> None:
         averaging_pct=AVERAGING_PCT,
         portfolio_profit_lock_trigger=PORTFOLIO_PROFIT_LOCK_TRIGGER,
         portfolio_profit_lock_giveback=PORTFOLIO_PROFIT_LOCK_GIVEBACK,
+        per_stock_stop_loss=PER_STOCK_STOP_LOSS,
     )
     entered_today: set[str] = set()
 
@@ -224,6 +226,9 @@ def run_shadow(poll_interval: int = POLL_INTERVAL_SECONDS) -> None:
 
             for result in engine.check_loss_cap(current_prices, _now()):
                 logger.event("daily_loss_cap", **result)
+
+            for result in engine.check_per_stock_stop_loss(current_prices, _now()):
+                logger.event("per_stock_stop_loss", **result)
 
             for result in engine.check_portfolio_profit_lock(current_prices, _now()):
                 logger.event("portfolio_profit_lock", **result)

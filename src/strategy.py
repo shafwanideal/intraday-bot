@@ -20,6 +20,13 @@ LIVE_CONCURRENT_SLOTS = 10  # requested 2026-08-28: live.py/shadow.py now reserv
 # pick without a restart. Tradeoff: exposure_per_unit is now sized as if up to 10 positions
 # could be open at once even on a day with only 2-3 picks, so each position starts smaller
 # than the old dynamic sizing gave it.
+PER_STOCK_STOP_LOSS = 2_000  # turned on as a live default 2026-08-28: closes a single
+# position outright once its own unrealized loss exceeds this, independent of averaging
+# state. Closes exactly the gap that let STARCEMENT ride to square-off (-1996 to -2311
+# unrealized over the course of that day) once its one averaging leg didn't recover.
+# -1500 was backtest-tested and shown to cut some genuine recoveries too eagerly; -2000
+# is untested against real data but would have caught STARCEMENT's worst points -- revisit
+# once more real days exist under it.
 GRID_PCT = 0.015  # revised from 2% on 2026-08-25 -- see grid_pct_and_costs memory for the backtest comparison
 # Trailing-stop/target activation threshold -- GRID_PCT above.
 AVERAGING_PCT = 0.01  # split off from GRID_PCT on 2026-08-26: averaging now fires on a smaller
