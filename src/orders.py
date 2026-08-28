@@ -150,9 +150,19 @@ def wait_for_fill(
     REJECTED, or CANCELLED), or the timeout elapses.
 
     Returns {"status": ..., "average_price": float|None, "filled_quantity": int,
-    "raw": <last order history entry>}. On timeout without a terminal state,
+    "raw": <last order history entry>}.
+
+    On timeout, actively cancels the order rather than leaving it resting on
+    the exchange -- an unfilled LIMIT order left open (e.g. GROWW on
+    2026-08-26, ATHERENERG/TEJASNET on 2026-08-28, all thin/illiquid at that
+    moment) can fill later completely outside the engine's tracking, since no
+    position was ever recorded for it. Re-checks order history once after the
+    cancel attempt: if it turns out the order actually filled in the brief
+    window between the last poll and the cancel call, that COMPLETE result is
+    returned instead of a misleading TIMEOUT. If genuinely nothing can be
+    confirmed (e.g. the cancel call itself failed for an unclear reason),
     status is "TIMEOUT" -- caller must treat this as "unknown, needs manual
-    checking", not as success or failure.
+    checking", not as success or failure, and check Kite directly.
     """
     deadline = time_module.monotonic() + timeout_seconds
     last_entry: dict | None = None
@@ -175,6 +185,26 @@ def wait_for_fill(
                     "raw": last_entry,
                 }
         time_module.sleep(poll_interval)
+
+    try:
+        kite.cancel_order(variety=kite.VARIETY_REGULAR, order_id=order_id)
+    except PLACEMENT_EXCEPTIONS:
+        pass  # may already be filled/cancelled/rejected -- the re-check below is what matters
+
+    try:
+        history = kite.order_history(order_id)
+        if history:
+            final_entry = history[-1]
+            final_status = final_entry.get("status")
+            if final_status in TERMINAL_STATUSES:
+                return {
+                    "status": final_status,
+                    "average_price": final_entry.get("average_price") or None,
+                    "filled_quantity": final_entry.get("filled_quantity") or 0,
+                    "raw": final_entry,
+                }
+    except PLACEMENT_EXCEPTIONS:
+        pass
 
     return {
         "status": "TIMEOUT",
