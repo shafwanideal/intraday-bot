@@ -9,7 +9,17 @@ import requests
 from kiteconnect.exceptions import KiteException
 
 from . import auth, config, kite_data, orders
-from .strategy import AVERAGING_PCT, DEFAULT_ATR_MULTIPLIER, MARGIN_CAPITAL, MAX_STOCKS_PER_DAY, SQUARE_OFF_TIME, GridEngine, Position
+from .strategy import (
+    AVERAGING_PCT,
+    DEFAULT_ATR_MULTIPLIER,
+    MARGIN_CAPITAL,
+    MAX_STOCKS_PER_DAY,
+    PORTFOLIO_PROFIT_LOCK_GIVEBACK,
+    PORTFOLIO_PROFIT_LOCK_TRIGGER,
+    SQUARE_OFF_TIME,
+    GridEngine,
+    Position,
+)
 
 IST = ZoneInfo("Asia/Kolkata")
 
@@ -309,6 +319,8 @@ def run_live(poll_interval: int = POLL_INTERVAL_SECONDS) -> None:
         max_concurrent_positions=max_concurrent_positions,
         total_units=total_units,
         averaging_pct=AVERAGING_PCT,
+        portfolio_profit_lock_trigger=PORTFOLIO_PROFIT_LOCK_TRIGGER,
+        portfolio_profit_lock_giveback=PORTFOLIO_PROFIT_LOCK_GIVEBACK,
     )
 
     entered_today: set[str] = set()
@@ -540,6 +552,27 @@ def run_live(poll_interval: int = POLL_INTERVAL_SECONDS) -> None:
                     )
                 else:
                     logger.event("daily_loss_cap_exit", symbol=symbol, price=fill["average_price"], qty=fill["filled_quantity"])
+
+            for result in engine.check_portfolio_profit_lock(current_prices, _now()):
+                symbol = result["symbol"]
+                sell_qty = real_qty.pop(symbol, None)
+                if sell_qty is None:
+                    logger.critical(
+                        f"{symbol} portfolio-profit-lock exit triggered but no real_qty on record. Check Kite directly.",
+                        symbol=symbol,
+                    )
+                    continue
+                transaction_type = "SELL" if result["direction"] == "long" else "BUY"
+                fill = place_and_confirm(symbol, transaction_type, sell_qty, result["exit_price"], tag="portfolio_profit_lock")
+                if fill["status"] != "COMPLETE":
+                    logger.critical(
+                        f"{symbol} portfolio-profit-lock exit did NOT confirm filled -- "
+                        "real position may still be open. Check Kite directly and close it manually.",
+                        symbol=symbol,
+                        fill_result=fill,
+                    )
+                else:
+                    logger.event("portfolio_profit_lock_exit", symbol=symbol, price=fill["average_price"], qty=fill["filled_quantity"])
 
             if now >= SQUARE_OFF_TIME and engine.open_positions:
                 for result in engine.square_off(current_prices, _now()):

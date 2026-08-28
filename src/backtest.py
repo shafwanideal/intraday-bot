@@ -29,6 +29,8 @@ def run_backtest(
     symbol_atr: dict[str, float] | None = None,
     atr_multiplier: float | None = None,
     trail_grace_minutes: float = 0,
+    per_stock_stop_loss: float | None = None,
+    portfolio_profit_lock_trigger: float | None = None,
 ) -> dict:
     """Simulate the grid strategy (see `src.strategy.GridEngine`) against real
     intraday bars, bar by bar.
@@ -89,6 +91,8 @@ def run_backtest(
             trail_pct=trail_pct,
             atr_multiplier=atr_multiplier,
             trail_grace_minutes=trail_grace_minutes,
+            per_stock_stop_loss=per_stock_stop_loss,
+            portfolio_profit_lock_trigger=portfolio_profit_lock_trigger,
         )
 
         last_known_price: dict[str, float] = {}
@@ -124,6 +128,16 @@ def run_backtest(
                 sym: last_known_price.get(sym, pos.avg_price) for sym, pos in engine.open_positions.items()
             }
             engine.check_loss_cap(current_prices, t)
+            if engine.open_positions:
+                current_prices = {
+                    sym: last_known_price.get(sym, pos.avg_price) for sym, pos in engine.open_positions.items()
+                }
+                engine.check_per_stock_stop_loss(current_prices, t)
+            if engine.open_positions:
+                current_prices = {
+                    sym: last_known_price.get(sym, pos.avg_price) for sym, pos in engine.open_positions.items()
+                }
+                engine.check_portfolio_profit_lock(current_prices, t)
 
             if is_square_off and engine.open_positions:
                 current_prices = {

@@ -23,6 +23,14 @@ DAILY_LOSS_CAP = 10_000  # raised from Rs 5,000 -- see grid_pct_and_costs memory
 # loss cap proportionally instead of silently keeping (or losing) the Rs 50,000 sizing
 # this was actually calibrated against.
 DAILY_LOSS_CAP_PCT = DAILY_LOSS_CAP / MARGIN_CAPITAL  # 0.20
+PORTFOLIO_PROFIT_LOCK_TRIGGER = 700  # requested for 2026-08-28 (only for that day): once
+# total (realized + unrealized) day P&L first crosses this, arm and start trailing the peak.
+PORTFOLIO_PROFIT_LOCK_GIVEBACK = 300  # if total P&L then pulls back this much from its peak
+# after arming, everything closes immediately. Genuine trailing stop on the whole day's P&L,
+# not a fixed floor -- the lock level itself ratchets up as the peak grows. Set either to
+# None (in the GridEngine call) to disable on a different day; this isn't backtest-proven,
+# it's a same-day live request -- see the sweep in grid_pct_and_costs memory for why the
+# backtest evidence was thin before this was turned on.
 SQUARE_OFF_TIME = time(15, 8)  # moved earlier from 15:12 on 2026-08-26 -- Kite itself REJECTS MIS orders
 # placed AT or after 15:12 ("Intraday orders (MIS) are allowed only till 3:12 PM"), so a square-off
 # attempt landing exactly at 15:12 is already too late. On 2026-08-26 this happened for real -- all
@@ -129,6 +137,9 @@ class GridEngine:
         total_units: int = TOTAL_UNITS,
         max_concurrent_positions: int = MAX_CONCURRENT_POSITIONS,
         averaging_pct: float | None = None,
+        per_stock_stop_loss: float | None = None,
+        portfolio_profit_lock_trigger: float | None = None,
+        portfolio_profit_lock_giveback: float | None = None,
     ):
         self.grid_pct = grid_pct
         # None means "not explicitly overridden" -- defaults to grid_pct so existing callers
@@ -152,6 +163,20 @@ class GridEngine:
         self.daily_pnl = 0.0
         self.halted = False
         self.trade_log: list[dict] = []
+        # Rupee amount -- a single position's own unrealized loss exceeding this
+        # closes just that one position, independent of averaging/trailing state.
+        # Protects against exactly the "averaged once, still stuck red, nothing
+        # left to close it until square-off" case (STARCEMENT, 2026-08-28).
+        self.per_stock_stop_loss = per_stock_stop_loss
+        # Rupee amount -- once total (realized + unrealized) P&L across the whole
+        # day first crosses this, the day's profit gets a floor: if total P&L
+        # ever falls back down to this same trigger level after arming, every
+        # open position closes immediately to lock it in. Upside is never
+        # capped -- only armed once, then only fires on the pullback.
+        self.portfolio_profit_lock_trigger = portfolio_profit_lock_trigger
+        self.portfolio_profit_lock_giveback = portfolio_profit_lock_giveback
+        self.portfolio_profit_lock_armed = False
+        self.portfolio_profit_lock_peak = 0.0
 
     def can_enter(self, symbol: str) -> bool:
         return (
@@ -270,6 +295,58 @@ class GridEngine:
             self.halted = True
             return [
                 self._close(sym, current_prices.get(sym, self.open_positions[sym].avg_price), "daily_loss_cap", timestamp)
+                for sym in list(self.open_positions.keys())
+            ]
+        return []
+
+    def check_per_stock_stop_loss(self, current_prices: dict[str, float], timestamp) -> list[dict]:
+        """Close any single open position whose own unrealized loss exceeds
+        per_stock_stop_loss, regardless of averaging/trailing state -- the one
+        protection a position has left once it's already used its one
+        averaging leg and still hasn't recovered (see STARCEMENT, 2026-08-28:
+        no further automatic exit existed for a position stuck red after
+        averaging, right up until square-off)."""
+        if self.halted or not self.open_positions or self.per_stock_stop_loss is None:
+            return []
+        closed = []
+        for sym in list(self.open_positions.keys()):
+            pos = self.open_positions[sym]
+            price = current_prices.get(sym, pos.avg_price)
+            unrealized = pnl(pos.direction, pos.avg_price, price, pos.qty)
+            if unrealized <= -self.per_stock_stop_loss:
+                closed.append(self._close(sym, price, "per_stock_stop_loss", timestamp))
+        return closed
+
+    def check_portfolio_profit_lock(self, current_prices: dict[str, float], timestamp) -> list[dict]:
+        """Once total (realized + unrealized) P&L first crosses
+        portfolio_profit_lock_trigger, arm and start tracking the peak total
+        P&L reached since. If total P&L then pulls back
+        portfolio_profit_lock_giveback (rupees) from that peak, close
+        everything immediately. The floor itself ratchets up as the peak
+        grows -- this is a genuine trailing stop on the whole day's P&L, not
+        a fixed floor at the trigger level. Never caps the upside on its own;
+        only fires on the pullback. Halts further entries once triggered,
+        same as the loss cap, since a profit has already been locked in."""
+        if self.halted or not self.open_positions or self.portfolio_profit_lock_trigger is None:
+            return []
+        unrealized = sum(
+            pnl(pos.direction, pos.avg_price, current_prices.get(sym, pos.avg_price), pos.qty)
+            for sym, pos in self.open_positions.items()
+        )
+        total = self.daily_pnl + unrealized
+
+        if not self.portfolio_profit_lock_armed:
+            if total >= self.portfolio_profit_lock_trigger:
+                self.portfolio_profit_lock_armed = True
+                self.portfolio_profit_lock_peak = total
+            return []
+
+        self.portfolio_profit_lock_peak = max(self.portfolio_profit_lock_peak, total)
+        giveback = self.portfolio_profit_lock_giveback if self.portfolio_profit_lock_giveback is not None else 0.0
+        if total <= self.portfolio_profit_lock_peak - giveback:
+            self.halted = True
+            return [
+                self._close(sym, current_prices.get(sym, self.open_positions[sym].avg_price), "portfolio_profit_lock", timestamp)
                 for sym in list(self.open_positions.keys())
             ]
         return []
