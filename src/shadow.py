@@ -20,7 +20,6 @@ from .strategy import (
     MARGIN_CAPITAL,
     LIVE_CONCURRENT_SLOTS,
     MAX_STOCKS_PER_DAY,
-    PER_STOCK_STOP_LOSS,
     PORTFOLIO_PROFIT_LOCK_GIVEBACK,
     PORTFOLIO_PROFIT_LOCK_TRIGGER,
     SQUARE_OFF_TIME,
@@ -127,7 +126,7 @@ def run_shadow(poll_interval: int = POLL_INTERVAL_SECONDS) -> None:
         averaging_pct=AVERAGING_PCT,
         portfolio_profit_lock_trigger=PORTFOLIO_PROFIT_LOCK_TRIGGER,
         portfolio_profit_lock_giveback=PORTFOLIO_PROFIT_LOCK_GIVEBACK,
-        per_stock_stop_loss=PER_STOCK_STOP_LOSS,
+        # per_stock_stop_loss intentionally NOT wired in as a live default -- see live.py.
     )
     entered_today: set[str] = set()
 

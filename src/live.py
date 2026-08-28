@@ -15,7 +15,6 @@ from .strategy import (
     MARGIN_CAPITAL,
     LIVE_CONCURRENT_SLOTS,
     MAX_STOCKS_PER_DAY,
-    PER_STOCK_STOP_LOSS,
     PORTFOLIO_PROFIT_LOCK_GIVEBACK,
     PORTFOLIO_PROFIT_LOCK_TRIGGER,
     SQUARE_OFF_TIME,
@@ -348,7 +347,10 @@ def run_live(poll_interval: int = POLL_INTERVAL_SECONDS) -> None:
         averaging_pct=AVERAGING_PCT,
         portfolio_profit_lock_trigger=PORTFOLIO_PROFIT_LOCK_TRIGGER,
         portfolio_profit_lock_giveback=PORTFOLIO_PROFIT_LOCK_GIVEBACK,
-        per_stock_stop_loss=PER_STOCK_STOP_LOSS,
+        # per_stock_stop_loss intentionally NOT wired in as a live default -- tested against
+        # today's actual trades (2026-08-28) and it would have cut STARCEMENT right before
+        # its partial recovery, making the day worse (-Rs 1,150 vs the real +Rs 33). Left
+        # available in strategy.py/backtest.py for further testing, not turned on live.
     )
 
     entered_today: set[str] = set()
