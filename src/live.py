@@ -93,6 +93,22 @@ def _fetch_margin_capital(kite) -> float:
         return MARGIN_CAPITAL
 
 
+def _fetch_realized_pnl_today(kite) -> float:
+    """Today's already-realized intraday P&L (from Kite's own margin ledger),
+    so a restarted session's daily_pnl starts from the true full-day total
+    instead of resetting to 0. Without this, every restart makes both the
+    daily loss cap and the portfolio profit lock blind to whatever was
+    already booked before the restart -- found for real on 2026-08-28, where
+    a restart reset ~Rs 2,609 of already-realized profit out of the profit
+    lock's view entirely. Falls back to 0.0 (old behavior) if the margins
+    call fails, rather than blocking a restart over a transient API issue."""
+    try:
+        return float(kite.margins()["equity"]["utilised"]["m2m_realised"])
+    except (KeyError, TypeError, orders.PLACEMENT_EXCEPTIONS) as exc:
+        print(f"WARNING: could not fetch today's realized P&L ({exc}); daily_pnl starts at 0 -- loss cap/profit lock may be inaccurate until real trades update it.")
+        return 0.0
+
+
 def _load_todays_plan() -> dict[str, str]:
     if not TODAYS_STOCKS_FILE.exists():
         raise RuntimeError(f"{TODAYS_STOCKS_FILE} not found.")
@@ -259,6 +275,12 @@ def _confirm_or_abort(plan: dict[str, str], engine: GridEngine) -> bool:
     print(f"Margin capital (live, from Kite): Rs {engine.margin_capital:,.2f}  |  Exposure per unit: Rs {engine.exposure_per_unit:,.2f}")
     atr_desc = f"{engine.atr_multiplier}x" if engine.atr_multiplier is not None else "off (fixed %)"
     print(f"Daily loss cap: Rs {engine.daily_loss_cap:,.2f}  |  Grid: {engine.grid_pct:.1%}  |  ATR trail: {atr_desc}")
+    print(f"Realized P&L today (seeded from Kite): Rs {engine.daily_pnl:,.2f}")
+    if engine.portfolio_profit_lock_trigger is not None:
+        print(
+            f"Portfolio profit lock: arms at Rs {engine.portfolio_profit_lock_trigger:,.2f}, "
+            f"giveback Rs {engine.portfolio_profit_lock_giveback or 0:,.2f}"
+        )
     if engine.open_positions:
         print(f"\nRECONCILED {len(engine.open_positions)} existing real position(s) from a previous run today:")
         for sym, pos in engine.open_positions.items():
@@ -330,6 +352,9 @@ def run_live(poll_interval: int = POLL_INTERVAL_SECONDS) -> None:
     # engine's qty is fine for its own P&L bookkeeping; real order quantities
     # must come from here.
     real_qty: dict[str, int] = {}
+
+    engine.daily_pnl = _fetch_realized_pnl_today(kite)
+    logger.event("daily_pnl_seeded", daily_pnl=engine.daily_pnl)
 
     _reconcile_open_positions(kite, engine, symbol_atr, real_qty, entered_today, logger)
 
