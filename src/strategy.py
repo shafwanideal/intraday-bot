@@ -343,7 +343,12 @@ class GridEngine:
 
         self.portfolio_profit_lock_peak = max(self.portfolio_profit_lock_peak, total)
         giveback = self.portfolio_profit_lock_giveback if self.portfolio_profit_lock_giveback is not None else 0.0
-        if total <= self.portfolio_profit_lock_peak - giveback:
+        # Floor never drops below the original trigger itself -- it only ratchets UP once the
+        # peak grows past trigger + giveback. Same "floor" pattern as the per-position profit
+        # lock: 700 is the guaranteed worst case once armed, not just a starting point giveback
+        # can erode below.
+        floor = max(self.portfolio_profit_lock_peak - giveback, self.portfolio_profit_lock_trigger)
+        if total <= floor:
             self.halted = True
             return [
                 self._close(sym, current_prices.get(sym, self.open_positions[sym].avg_price), "portfolio_profit_lock", timestamp)
