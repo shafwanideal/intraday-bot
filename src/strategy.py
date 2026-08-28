@@ -23,7 +23,8 @@ DAILY_LOSS_CAP = 10_000  # raised from Rs 5,000 -- see grid_pct_and_costs memory
 # loss cap proportionally instead of silently keeping (or losing) the Rs 50,000 sizing
 # this was actually calibrated against.
 DAILY_LOSS_CAP_PCT = DAILY_LOSS_CAP / MARGIN_CAPITAL  # 0.20
-PORTFOLIO_PROFIT_LOCK_TRIGGER = 700  # requested for 2026-08-28 (only for that day): once
+PORTFOLIO_PROFIT_LOCK_TRIGGER = 1000  # raised from 700 later on 2026-08-28, same day, per
+# explicit request. Requested for 2026-08-28 (only for that day): once
 # total (realized + unrealized) day P&L first crosses this, arm and start trailing the peak.
 PORTFOLIO_PROFIT_LOCK_GIVEBACK = 300  # if total P&L then pulls back this much from its peak
 # after arming, everything closes immediately. Genuine trailing stop on the whole day's P&L,
