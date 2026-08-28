@@ -13,6 +13,7 @@ from .strategy import (
     AVERAGING_PCT,
     DEFAULT_ATR_MULTIPLIER,
     MARGIN_CAPITAL,
+    ENABLE_AVERAGING,
     LIVE_CONCURRENT_SLOTS,
     MAX_STOCKS_PER_DAY,
     PORTFOLIO_PROFIT_LOCK_GIVEBACK,
@@ -345,6 +346,7 @@ def run_live(poll_interval: int = POLL_INTERVAL_SECONDS) -> None:
         max_concurrent_positions=max_concurrent_positions,
         total_units=total_units,
         averaging_pct=AVERAGING_PCT,
+        enable_averaging=ENABLE_AVERAGING,
         portfolio_profit_lock_trigger=PORTFOLIO_PROFIT_LOCK_TRIGGER,
         portfolio_profit_lock_giveback=PORTFOLIO_PROFIT_LOCK_GIVEBACK,
         # per_stock_stop_loss intentionally NOT wired in as a live default -- tested against

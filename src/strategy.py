@@ -32,6 +32,14 @@ GRID_PCT = 0.015  # revised from 2% on 2026-08-25 -- see grid_pct_and_costs memo
 AVERAGING_PCT = 0.01  # split off from GRID_PCT on 2026-08-26: averaging now fires on a smaller
 # adverse move (1%) than the profit side needs to arm trailing (1.5%) -- previously both used
 # the same GRID_PCT value.
+ENABLE_AVERAGING = False  # turned off as a live default 2026-08-28. STARCEMENT (averaged
+# once, never recovered, -Rs 2,090 real) was the deciding case -- a position that uses its
+# one averaging leg and still doesn't recover currently has NO further automated protection
+# (per-stock stop-loss was tested and reverted the same day; trailing/profit-lock can't help
+# since they only ever arm once a position is genuinely in profit). Backtests earlier in the
+# session showed averaging net-positive on the accumulated data overall, so this is a
+# deliberate tradeoff -- giving up averaging's upside on days it works to remove the downside
+# risk of a position doubling down into a real decline. Revisit with more real days either way.
 DAILY_LOSS_CAP = 10_000  # raised from Rs 5,000 -- see grid_pct_and_costs memory for the tradeoff
 # Kept as a ratio (not a flat Rs figure) so a different real capital amount scales the
 # loss cap proportionally instead of silently keeping (or losing) the Rs 50,000 sizing
@@ -152,6 +160,7 @@ class GridEngine:
         total_units: int = TOTAL_UNITS,
         max_concurrent_positions: int = MAX_CONCURRENT_POSITIONS,
         averaging_pct: float | None = None,
+        trailing_activation_pct: float | None = None,
         enable_averaging: bool = True,
         per_stock_stop_loss: float | None = None,
         portfolio_profit_lock_trigger: float | None = None,
@@ -161,6 +170,10 @@ class GridEngine:
         # None means "not explicitly overridden" -- defaults to grid_pct so existing callers
         # (e.g. backtest.py) that only pass grid_pct keep their exact prior behavior.
         self.averaging_pct = averaging_pct if averaging_pct is not None else grid_pct
+        # None means "not explicitly overridden" -- defaults to grid_pct so existing callers
+        # keep their exact prior behavior. Separate from grid_pct so trailing can be tested
+        # at a lower activation threshold without touching the profit-lock floor's meaning.
+        self.trailing_activation_pct = trailing_activation_pct if trailing_activation_pct is not None else grid_pct
         self.enable_averaging = enable_averaging
         self.apply_costs = apply_costs
         self.margin_capital = margin_capital
@@ -260,7 +273,9 @@ class GridEngine:
             # ratchet UP toward the peak, never back down past the level that
             # locks in the original grid_pct move.
             lock_price = (
-                pos.avg_price * (1 + self.grid_pct) if pos.direction == "long" else pos.avg_price * (1 - self.grid_pct)
+                pos.avg_price * (1 + self.trailing_activation_pct)
+                if pos.direction == "long"
+                else pos.avg_price * (1 - self.trailing_activation_pct)
             )
             if pos.direction == "long":
                 pos.peak_price = max(pos.peak_price, price)
@@ -283,7 +298,10 @@ class GridEngine:
 
         move = move_pct(pos.direction, pos.avg_price, price)
 
-        if move >= self.grid_pct:
+        # Trailing arms at trailing_activation_pct (may differ from grid_pct); a direct
+        # target exit (trail_stop=False) still uses grid_pct, its original meaning.
+        arm_threshold = self.trailing_activation_pct if self.trail_stop else self.grid_pct
+        if move >= arm_threshold:
             if self.trail_stop:
                 pos.trailing = True
                 pos.peak_price = price
