@@ -37,15 +37,15 @@ DAILY_LOSS_CAP = 10_000  # raised from Rs 5,000 -- see grid_pct_and_costs memory
 # loss cap proportionally instead of silently keeping (or losing) the Rs 50,000 sizing
 # this was actually calibrated against.
 DAILY_LOSS_CAP_PCT = DAILY_LOSS_CAP / MARGIN_CAPITAL  # 0.20
-PORTFOLIO_PROFIT_LOCK_TRIGGER = 1000  # raised from 700 later on 2026-08-28, same day, per
-# explicit request. Requested for 2026-08-28 (only for that day): once
+PORTFOLIO_PROFIT_LOCK_TRIGGER = 3000  # raised 700 -> 1000 -> 3000 through 2026-08-28; the
+# 3000 figure is now the standing default, not a one-day-only setting. Once
 # total (realized + unrealized) day P&L first crosses this, arm and start trailing the peak.
-PORTFOLIO_PROFIT_LOCK_GIVEBACK = 300  # if total P&L then pulls back this much from its peak
-# after arming, everything closes immediately. Genuine trailing stop on the whole day's P&L,
-# not a fixed floor -- the lock level itself ratchets up as the peak grows. Set either to
-# None (in the GridEngine call) to disable on a different day; this isn't backtest-proven,
-# it's a same-day live request -- see the sweep in grid_pct_and_costs memory for why the
-# backtest evidence was thin before this was turned on.
+PORTFOLIO_PROFIT_LOCK_GIVEBACK = 500  # raised from 300 alongside the trigger. If total P&L
+# then pulls back this much from its peak after arming, everything closes immediately.
+# Genuine trailing stop on the whole day's P&L, not a fixed floor -- the lock level itself
+# ratchets up as the peak grows. Set either to None (in the GridEngine call) to disable;
+# not backtest-proven -- see the sweeps in grid_pct_and_costs memory for why the backtest
+# evidence was thin before this was turned on.
 SQUARE_OFF_TIME = time(15, 8)  # moved earlier from 15:12 on 2026-08-26 -- Kite itself REJECTS MIS orders
 # placed AT or after 15:12 ("Intraday orders (MIS) are allowed only till 3:12 PM"), so a square-off
 # attempt landing exactly at 15:12 is already too late. On 2026-08-26 this happened for real -- all
