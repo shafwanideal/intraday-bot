@@ -14,6 +14,10 @@ LIVE_TRADING_ENABLED = os.environ.get("LIVE_TRADING_ENABLED", "").strip().lower(
 
 SESSION_FILE = os.path.join(os.path.dirname(os.path.dirname(__file__)), ".kite_session.json")
 
+# Optional -- Telegram alerts. src/telegram_notify.py no-ops entirely if either is unset.
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
+
 
 def require_credentials() -> None:
     missing = [

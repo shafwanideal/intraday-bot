@@ -33,6 +33,7 @@ def run_backtest(
     portfolio_profit_lock_trigger: float | None = None,
     portfolio_profit_lock_giveback: float | None = None,
     enable_averaging: bool = True,
+    trailing_activation_pct: float | None = None,
 ) -> dict:
     """Simulate the grid strategy (see `src.strategy.GridEngine`) against real
     intraday bars, bar by bar.
@@ -97,6 +98,7 @@ def run_backtest(
             portfolio_profit_lock_trigger=portfolio_profit_lock_trigger,
             portfolio_profit_lock_giveback=portfolio_profit_lock_giveback,
             enable_averaging=enable_averaging,
+            trailing_activation_pct=trailing_activation_pct,
         )
 
         last_known_price: dict[str, float] = {}

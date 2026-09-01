@@ -12,3 +12,4 @@ logs/
 .claude/
 todays_stocks.json
 todays_live_stocks.json
+.DS_Store

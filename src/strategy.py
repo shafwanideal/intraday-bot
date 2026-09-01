@@ -47,11 +47,26 @@ ENABLE_AVERAGING = False  # turned off as a live default 2026-08-28. STARCEMENT 
 # session showed averaging net-positive on the accumulated data overall, so this is a
 # deliberate tradeoff -- giving up averaging's upside on days it works to remove the downside
 # risk of a position doubling down into a real decline. Revisit with more real days either way.
-DAILY_LOSS_CAP = 10_000  # raised from Rs 5,000 -- see grid_pct_and_costs memory for the tradeoff
-# Kept as a ratio (not a flat Rs figure) so a different real capital amount scales the
-# loss cap proportionally instead of silently keeping (or losing) the Rs 50,000 sizing
-# this was actually calibrated against.
-DAILY_LOSS_CAP_PCT = DAILY_LOSS_CAP / MARGIN_CAPITAL  # 0.20
+DAILY_LOSS_CAP = 3_000  # standing default at/under DAILY_LOSS_CAP_BASE_CAPITAL -- see
+# compute_daily_loss_cap() below. Replaced the old 20%-of-capital cap (Rs 10,000 on a
+# Rs 50,000 day, Rs 20,000 on a Rs 1L day) on 2026-09-01 after a real Rs 5,000 loss day --
+# that cap was far too loose to actually stop a bad day early. Requested explicitly:
+# floor of Rs 3,000 for capital <= Rs 1L, scaling up Rs 500 per extra Rs 50,000 of capital
+# (Rs 3,500 at Rs 1.5L, Rs 4,000 at Rs 2L) so the cap stays roughly proportional to risk
+# as the account grows without being as loose as the old 20% ratio.
+DAILY_LOSS_CAP_BASE_CAPITAL = 100_000  # capital at/under which the cap is pinned to the floor
+DAILY_LOSS_CAP_STEP = 500  # cap increases by this much per DAILY_LOSS_CAP_STEP_CAPITAL of
+# capital above the base -- e.g. Rs 150,000 -> 3,000 + 500 = Rs 3,500
+DAILY_LOSS_CAP_STEP_CAPITAL = 50_000
+
+
+def compute_daily_loss_cap(margin_capital: float) -> float:
+    """Rs 3,000 floor for any capital <= Rs 1L; above that, +Rs 500 per +Rs 50,000 of
+    capital. E.g. Rs 50k/1L -> 3,000, Rs 1.5L -> 3,500, Rs 2L -> 4,000."""
+    if margin_capital <= DAILY_LOSS_CAP_BASE_CAPITAL:
+        return DAILY_LOSS_CAP
+    excess = margin_capital - DAILY_LOSS_CAP_BASE_CAPITAL
+    return DAILY_LOSS_CAP + (excess / DAILY_LOSS_CAP_STEP_CAPITAL) * DAILY_LOSS_CAP_STEP
 PORTFOLIO_PROFIT_LOCK_TRIGGER = 3000  # raised 700 -> 1000 -> 3000 through 2026-08-28; the
 # 3000 figure is now the standing default, not a one-day-only setting. Once
 # total (realized + unrealized) day P&L first crosses this, arm and start trailing the peak.
@@ -189,7 +204,7 @@ class GridEngine:
         self.exposure_per_unit = (margin_capital / total_units) * leverage
         # None means "not explicitly overridden" -- derive from margin_capital so the
         # cap scales with real capital instead of staying pinned to the Rs 50,000 default.
-        self.daily_loss_cap = daily_loss_cap if daily_loss_cap is not None else margin_capital * DAILY_LOSS_CAP_PCT
+        self.daily_loss_cap = daily_loss_cap if daily_loss_cap is not None else compute_daily_loss_cap(margin_capital)
         self.trail_stop = trail_stop
         self.trail_pct = trail_pct if trail_pct is not None else grid_pct / 2
         self.atr_multiplier = atr_multiplier  # if set, trail distance = atr_multiplier * position's ATR (price units) instead of trail_pct
