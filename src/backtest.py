@@ -1,6 +1,16 @@
 import pandas as pd
 
-from src.strategy import DAILY_LOSS_CAP, DEFAULT_ATR_MULTIPLIER, GRID_PCT, LEVERAGE, MARGIN_CAPITAL, SQUARE_OFF_TIME, GridEngine
+from src.strategy import (
+    DAILY_LOSS_CAP,
+    DEFAULT_ATR_MULTIPLIER,
+    GRID_PCT,
+    LEVERAGE,
+    MARGIN_CAPITAL,
+    MAX_CONCURRENT_POSITIONS,
+    SQUARE_OFF_TIME,
+    TOTAL_UNITS,
+    GridEngine,
+)
 
 # Re-exported for callers/tests that reach for these on this module.
 __all__ = [
@@ -34,6 +44,9 @@ def run_backtest(
     portfolio_profit_lock_giveback: float | None = None,
     enable_averaging: bool = True,
     trailing_activation_pct: float | None = None,
+    margin_capital: float = MARGIN_CAPITAL,
+    total_units: int = TOTAL_UNITS,
+    max_concurrent_positions: int = MAX_CONCURRENT_POSITIONS,
 ) -> dict:
     """Simulate the grid strategy (see `src.strategy.GridEngine`) against real
     intraday bars, bar by bar.
@@ -99,6 +112,9 @@ def run_backtest(
             portfolio_profit_lock_giveback=portfolio_profit_lock_giveback,
             enable_averaging=enable_averaging,
             trailing_activation_pct=trailing_activation_pct,
+            margin_capital=margin_capital,
+            total_units=total_units,
+            max_concurrent_positions=max_concurrent_positions,
         )
 
         last_known_price: dict[str, float] = {}
