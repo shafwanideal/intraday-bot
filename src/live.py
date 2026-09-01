@@ -1,5 +1,6 @@
 import json
 import math
+import os
 import time as time_module
 from datetime import datetime, time
 from pathlib import Path
@@ -400,6 +401,32 @@ def run_live(poll_interval: int = POLL_INTERVAL_SECONDS) -> None:
 
     engine.daily_pnl = _fetch_realized_pnl_today(kite)
     logger.event("daily_pnl_seeded", daily_pnl=engine.daily_pnl)
+
+    # Opt-in, one-restart-at-a-time override: if a prior session today already breached
+    # the loss cap (daily_pnl seeded below -daily_loss_cap), starting fresh as-is would
+    # enter and then instantly exit every new position on the very next poll -- pure
+    # churn, no benefit. Set FRESH_LOSS_BUDGET=true in the environment (not .env -- this
+    # is meant to be a deliberate one-time choice per restart, not a standing default)
+    # to extend the cap by however much is already realized-negative, giving exactly a
+    # fresh cap-sized budget counted only from new trades onward. Does NOT erase the
+    # already-realized loss -- it's still real money lost -- it only stops the cap from
+    # immediately re-triggering on trades placed after this point.
+    if os.environ.get("FRESH_LOSS_BUDGET", "").strip().lower() == "true":
+        already_lost = max(0.0, -engine.daily_pnl)
+        if already_lost > 0:
+            old_cap = engine.daily_loss_cap
+            engine.daily_loss_cap += already_lost
+            logger.event(
+                "fresh_loss_budget_applied",
+                already_realized_loss=round(already_lost, 2),
+                old_cap=old_cap,
+                new_cap=round(engine.daily_loss_cap, 2),
+            )
+            print(
+                f"FRESH_LOSS_BUDGET active: already realized -Rs {already_lost:,.2f} today. "
+                f"Cap extended {old_cap:,.2f} -> {engine.daily_loss_cap:,.2f} so today's "
+                f"NEW trades still get a full fresh budget from here."
+            )
 
     _reconcile_open_positions(kite, engine, symbol_atr, real_qty, entered_today, logger)
 
