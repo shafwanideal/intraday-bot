@@ -34,6 +34,16 @@ PER_STOCK_STOP_LOSS = 2_000  # turned on as a live default 2026-08-28: closes a 
 # -1500 was backtest-tested and shown to cut some genuine recoveries too eagerly; -2000
 # is untested against real data but would have caught STARCEMENT's worst points -- revisit
 # once more real days exist under it.
+TRAIL_STOP = False  # turned off as a live default 2026-09-01. Direct target_exit at
+# GRID_PCT now instead of arming a trailing stop that rides further and gives some
+# of it back on the pullback. Requested after a rough morning (loss cap tripped
+# twice) got misread as "trailing caused a stop-loss" -- it hadn't (both
+# trailing_stop_exit closes that day were profitable), but a same-day backtest of
+# that morning's 9 symbols with trail_stop=False vs True showed the two land in the
+# same ballpark net (-3,408 vs -3,498) -- the loss cap tripping is what actually
+# drove the day, not trailing. Turning trailing off is a legitimate simpler choice
+# (locks in exactly GRID_PCT rather than risking a bigger pullback for more upside)
+# but isn't a fix for what actually happened that morning.
 GRID_PCT = 0.015  # revised from 2% on 2026-08-25 -- see grid_pct_and_costs memory for the backtest comparison
 # Trailing-stop/target activation threshold -- GRID_PCT above.
 AVERAGING_PCT = 0.01  # split off from GRID_PCT on 2026-08-26: averaging now fires on a smaller
