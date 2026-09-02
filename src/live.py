@@ -755,7 +755,7 @@ def run_live(poll_interval: int = POLL_INTERVAL_SECONDS) -> None:
                     )
                     continue
                 transaction_type = "SELL" if result["direction"] == "long" else "BUY"
-                fill = place_and_confirm(symbol, transaction_type, sell_qty, result["exit_price"], tag="portfolio_profit_lock")
+                fill = place_and_confirm(symbol, transaction_type, sell_qty, result["exit_price"], tag="profit_lock")
                 if fill["status"] != "COMPLETE":
                     logger.critical(
                         f"{symbol} portfolio-profit-lock exit did NOT confirm filled -- "

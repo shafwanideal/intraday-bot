@@ -91,7 +91,16 @@ def place_market_order(
     it's unclear whether the request reached Kite at all; does NOT retry in
     that case (checks kite.orders() for a possible match first, since
     blindly retrying risks a duplicate real order).
+
+    Raises ValueError up front if `tag` is over Kite's 20-char limit, rather
+    than letting Kite reject the order -- found for real on 2026-09-02, where
+    tag="portfolio_profit_lock" (22 chars) caused every single position's
+    exit order to get rejected simultaneously when the portfolio profit lock
+    fired, leaving all 7 real positions open and completely unmonitored
+    (the engine's own bookkeeping had already assumed they were closed).
     """
+    if tag is not None and len(tag) > 20:
+        raise ValueError(f"Order tag {tag!r} is {len(tag)} chars, over Kite's 20-char limit -- Kite would reject this order.")
     tick_size = kite_data.get_tick_size(kite, symbol)
     limit_price = _protected_limit_price(reference_price, transaction_type, tick_size)
     try:
