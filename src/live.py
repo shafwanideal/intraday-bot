@@ -100,21 +100,61 @@ def _fetch_margin_capital(kite) -> float:
         return MARGIN_CAPITAL
 
 
-def _fetch_realized_pnl_today(kite) -> float:
-    """Today's already-realized intraday P&L, summed only over symbols Kite
-    shows as fully squared off (net quantity 0) in kite.positions()["day"] --
-    so a restarted session's daily_pnl starts from the true full-day realized
-    total instead of resetting to 0. Deliberately excludes any symbol still
-    showing an open quantity: that P&L is unrealized and the engine already
-    recomputes it live from reconciled open positions -- including it here
-    too would double-count it in check_loss_cap / check_portfolio_profit_lock.
+def _reconstruct_symbol_state(orders_for_symbol: list[dict]) -> tuple[float, list[tuple[float, int]], str | None]:
+    """FIFO-simulate one symbol's today's-COMPLETE-MIS-orders, in chronological
+    order, into (realized_pnl, open_legs, direction). open_legs is whatever's
+    left in the FIFO queue after simulation -- i.e. the CURRENT open position's
+    actual entry legs, correctly isolated from any earlier round trip on the
+    same symbol today (a symbol closed and reopened same day, e.g. COALINDIA
+    on 2026-09-02, previously broke both the reconciliation match check and
+    the realized-P&L seeding, which each separately summed/matched against
+    ALL of today's same-side orders instead of just the current leg's).
+    direction is None if the symbol is fully flat (queue empty)."""
+    queue: list[list] = []  # [price, qty, side] lots, FIFO
+    realized = 0.0
+    for o in sorted(orders_for_symbol, key=lambda o: o.get("order_timestamp") or ""):
+        side = o["transaction_type"]
+        qty = o["filled_quantity"]
+        price = o["average_price"]
+        while qty > 0:
+            if queue and queue[0][2] != side:
+                lot_price, lot_qty, lot_side = queue[0]
+                matched = min(qty, lot_qty)
+                realized += (price - lot_price) * matched if lot_side == "BUY" else (lot_price - price) * matched
+                lot_qty -= matched
+                qty -= matched
+                if lot_qty == 0:
+                    queue.pop(0)
+                else:
+                    queue[0][1] = lot_qty
+            else:
+                queue.append([price, qty, side])
+                qty = 0
+    if not queue:
+        return realized, [], None
+    direction = "long" if queue[0][2] == "BUY" else "short"
+    return realized, [(p, q) for p, q, _ in queue], direction
 
-    Switched 2026-09-02 from kite.margins()["equity"]["utilised"]["m2m_realised"],
-    which was found to read back 0 all day on 2026-09-01 despite a real -Rs
-    3,341 already booked (verified by hand from the raw order fills) -- that
-    field is not reliable for this account/segment. positions()["day"]["pnl"]
-    was cross-checked against a manual entry/exit calc for a real closed
-    trade the same morning (COALINDIA, +Rs 812.20) and matched exactly.
+
+def _fetch_realized_pnl_today(kite) -> float:
+    """Today's already-realized intraday P&L, computed by FIFO-matching every
+    symbol's today's-COMPLETE-MIS-orders (see _reconstruct_symbol_state) and
+    summing the realized portion only -- so a restarted session's daily_pnl
+    starts from the true full-day realized total instead of resetting to 0.
+    Deliberately excludes whatever's left open in each symbol's FIFO queue:
+    that P&L is unrealized and the engine already recomputes it live from
+    reconciled open positions -- including it here too would double-count it
+    in check_loss_cap / check_portfolio_profit_lock.
+
+    Rewritten 2026-09-02 (second time that day) from a version keyed off
+    kite.positions()["day"]["quantity"] == 0, which undercounted any symbol
+    closed and later reopened same day (COALINDIA: closed +Rs 812.20, then
+    reopened -- the quantity!=0 check on the reopened leg excluded that
+    already-realized profit from seeding entirely). FIFO matching handles
+    this correctly regardless of how many times a symbol round-tripped today.
+    Before that, this used kite.margins()["equity"]["utilised"]["m2m_realised"],
+    which read back 0 all day on 2026-09-01 despite a real -Rs 3,341 already
+    booked -- not reliable for this account/segment at all.
 
     Without this seeding entirely, every restart makes both the daily loss
     cap and the portfolio profit lock blind to whatever was already booked
@@ -123,11 +163,13 @@ def _fetch_realized_pnl_today(kite) -> float:
     entirely. Falls back to 0.0 (old behavior) if the API call fails, rather
     than blocking a restart over a transient issue."""
     try:
-        return sum(
-            float(p["pnl"])
-            for p in kite.positions()["day"]
-            if p.get("quantity", 0) == 0
-        )
+        today_orders = [
+            o for o in kite.orders() if o.get("product") == "MIS" and o.get("status") == "COMPLETE"
+        ]
+        by_symbol: dict[str, list[dict]] = {}
+        for o in today_orders:
+            by_symbol.setdefault(o["tradingsymbol"], []).append(o)
+        return sum(_reconstruct_symbol_state(order_list)[0] for order_list in by_symbol.values())
     except (KeyError, TypeError, orders.PLACEMENT_EXCEPTIONS) as exc:
         print(f"WARNING: could not fetch today's realized P&L ({exc}); daily_pnl starts at 0 -- loss cap/profit lock may be inaccurate until real trades update it.")
         return 0.0
@@ -207,26 +249,26 @@ def _reconcile_open_positions(
         symbol = p["tradingsymbol"]
         net_qty = p["quantity"]
         direction = "long" if net_qty > 0 else "short"
-        entry_side = "BUY" if direction == "long" else "SELL"
-        matching = sorted(
-            (
-                o
-                for o in today_orders
-                if o.get("tradingsymbol") == symbol
-                and o.get("product") == "MIS"
-                and o.get("transaction_type") == entry_side
-                and o.get("status") == "COMPLETE"
-            ),
-            key=lambda o: o.get("order_timestamp") or "",
-        )
-        legs = [(o["average_price"], o["filled_quantity"]) for o in matching]
+        symbol_orders = [
+            o
+            for o in today_orders
+            if o.get("tradingsymbol") == symbol and o.get("product") == "MIS" and o.get("status") == "COMPLETE"
+        ]
+        # FIFO-reconstructed open legs -- correctly isolates the CURRENT leg even
+        # if this symbol already closed and reopened earlier today (a naive "sum
+        # every same-side order today" match breaks on that case: COALINDIA on
+        # 2026-09-02 had an earlier closed 124-share round trip plus a fresh
+        # 49-share reopen, and summing all BUY orders found 173 != 49, dropping
+        # a real, currently-open, unmonitored position entirely).
+        _, legs, reconstructed_direction = _reconstruct_symbol_state(symbol_orders)
         total_leg_qty = sum(q for _, q in legs)
-        if not legs or total_leg_qty != abs(net_qty):
+        if not legs or reconstructed_direction != direction or total_leg_qty != abs(net_qty):
             logger.critical(
                 f"{symbol} has an open real position (net qty={net_qty}) from a previous run, but reconstructing "
                 f"its entry legs from today's order history didn't cleanly match (found {total_leg_qty} shares "
-                f"across {len(legs)} order(s), expected {abs(net_qty)}). Refusing to guess -- this position will "
-                "NOT be monitored by this session. Check Kite directly and consider closing it manually.",
+                f"across {len(legs)} leg(s), direction={reconstructed_direction}, expected {abs(net_qty)} "
+                f"{direction}). Refusing to guess -- this position will NOT be monitored by this session. Check "
+                "Kite directly and consider closing it manually.",
                 symbol=symbol,
                 net_qty=net_qty,
                 reconstructed_legs=legs,
@@ -236,7 +278,8 @@ def _reconcile_open_positions(
         if symbol not in symbol_atr:
             symbol_atr.update(kite_data.fetch_symbol_atr([symbol]))
 
-        entry_time = matching[0].get("order_timestamp") or _now()
+        entry_orders = sorted(symbol_orders, key=lambda o: o.get("order_timestamp") or "")
+        entry_time = entry_orders[0].get("order_timestamp") if entry_orders else _now()
         engine.open_positions[symbol] = Position(
             symbol=symbol, direction=direction, entry_time=entry_time, legs=legs, atr=symbol_atr.get(symbol), averaged=len(legs) > 1
         )
