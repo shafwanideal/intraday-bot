@@ -34,16 +34,23 @@ PER_STOCK_STOP_LOSS = 2_000  # turned on as a live default 2026-08-28: closes a 
 # -1500 was backtest-tested and shown to cut some genuine recoveries too eagerly; -2000
 # is untested against real data but would have caught STARCEMENT's worst points -- revisit
 # once more real days exist under it.
-TRAIL_STOP = False  # turned off as a live default 2026-09-01. Direct target_exit at
-# GRID_PCT now instead of arming a trailing stop that rides further and gives some
-# of it back on the pullback. Requested after a rough morning (loss cap tripped
-# twice) got misread as "trailing caused a stop-loss" -- it hadn't (both
-# trailing_stop_exit closes that day were profitable), but a same-day backtest of
-# that morning's 9 symbols with trail_stop=False vs True showed the two land in the
-# same ballpark net (-3,408 vs -3,498) -- the loss cap tripping is what actually
-# drove the day, not trailing. Turning trailing off is a legitimate simpler choice
-# (locks in exactly GRID_PCT rather than risking a bigger pullback for more upside)
-# but isn't a fix for what actually happened that morning.
+TRAIL_STOP = False  # turned off 2026-09-01, then superseded by PROFIT_EXIT below
+# the same day once it became clear a plain target_exit at GRID_PCT (what trail_stop
+# =False actually does) wasn't what was wanted either -- COALINDIA hit target and
+# closed in 2 minutes on 2026-09-02, which is direct target_exit behavior working
+# exactly as coded, but not the intent. Kept as False since PROFIT_EXIT=False now
+# skips this setting's branch entirely anyway.
+PROFIT_EXIT = False  # turned off as a live default 2026-09-02: NO automatic
+# profit-taking at all -- no fixed target, no trailing arm. A position now only
+# ever closes via square_off (3:15/3:30 PM), daily_loss_cap, per_stock_stop_loss
+# (if enabled), or portfolio_profit_lock. It rides the full move for better or
+# worse. Requested explicitly ("NO TARGET TO BE SET, NO TRAILING SL") after
+# COALINDIA's 2-minute target_exit on 2026-09-02 showed that trail_stop=False
+# alone (a fixed 1.5% target) still wasn't "no exit strategy" -- this is the
+# actual "let it ride" setting. Real risk: an open position between now and
+# square-off has NOTHING protecting its own downside except the whole-portfolio
+# daily_loss_cap -- a single bad name can ride uncushioned all the way to
+# square-off as long as the total account P&L stays above -3,000.
 GRID_PCT = 0.015  # revised from 2% on 2026-08-25 -- see grid_pct_and_costs memory for the backtest comparison
 # Trailing-stop/target activation threshold -- GRID_PCT above.
 AVERAGING_PCT = 0.01  # split off from GRID_PCT on 2026-08-26: averaging now fires on a smaller
@@ -185,6 +192,7 @@ class GridEngine:
         leverage: float = LEVERAGE,
         daily_loss_cap: float | None = None,
         trail_stop: bool = True,
+        profit_exit: bool = True,
         trail_pct: float | None = None,
         atr_multiplier: float | None = None,
         trail_grace_minutes: float = 0,
@@ -216,6 +224,7 @@ class GridEngine:
         # cap scales with real capital instead of staying pinned to the Rs 50,000 default.
         self.daily_loss_cap = daily_loss_cap if daily_loss_cap is not None else compute_daily_loss_cap(margin_capital)
         self.trail_stop = trail_stop
+        self.profit_exit = profit_exit
         self.trail_pct = trail_pct if trail_pct is not None else grid_pct / 2
         self.atr_multiplier = atr_multiplier  # if set, trail distance = atr_multiplier * position's ATR (price units) instead of trail_pct
         self.trail_grace_minutes = trail_grace_minutes  # no trailing-stop exit allowed this long after trailing activates
@@ -332,14 +341,18 @@ class GridEngine:
 
         # Trailing arms at trailing_activation_pct (may differ from grid_pct); a direct
         # target exit (trail_stop=False) still uses grid_pct, its original meaning.
-        arm_threshold = self.trailing_activation_pct if self.trail_stop else self.grid_pct
-        if move >= arm_threshold:
-            if self.trail_stop:
-                pos.trailing = True
-                pos.peak_price = price
-                pos.trailing_activated_at = timestamp
-                return None
-            return self._close(symbol, price, "target_exit", timestamp)
+        # profit_exit=False skips this whole block -- no target, no trailing arm --
+        # the position rides until square_off, daily_loss_cap, per_stock_stop_loss,
+        # or portfolio_profit_lock closes it. Nothing takes profit on its own.
+        if self.profit_exit:
+            arm_threshold = self.trailing_activation_pct if self.trail_stop else self.grid_pct
+            if move >= arm_threshold:
+                if self.trail_stop:
+                    pos.trailing = True
+                    pos.peak_price = price
+                    pos.trailing_activated_at = timestamp
+                    return None
+                return self._close(symbol, price, "target_exit", timestamp)
 
         if self.enable_averaging and not pos.averaged and move <= -self.averaging_pct and self.capital_units_available >= 1:
             qty = self.exposure_per_unit / price

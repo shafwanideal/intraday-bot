@@ -21,6 +21,7 @@ from .strategy import (
     PORTFOLIO_PROFIT_LOCK_GIVEBACK,
     PORTFOLIO_PROFIT_LOCK_TRIGGER,
     PREMARKET_TRANCHE_PCT,
+    PROFIT_EXIT,
     SQUARE_OFF_TIME,
     TRAIL_STOP,
     GridEngine,
@@ -385,6 +386,7 @@ def run_live(poll_interval: int = POLL_INTERVAL_SECONDS) -> None:
         averaging_pct=AVERAGING_PCT,
         enable_averaging=ENABLE_AVERAGING,
         trail_stop=TRAIL_STOP,
+        profit_exit=PROFIT_EXIT,
         portfolio_profit_lock_trigger=PORTFOLIO_PROFIT_LOCK_TRIGGER,
         portfolio_profit_lock_giveback=PORTFOLIO_PROFIT_LOCK_GIVEBACK,
         # per_stock_stop_loss intentionally NOT wired in as a live default -- tested against
