@@ -71,11 +71,27 @@ def is_fresh_52w_low(daily_df: pd.DataFrame, as_of: date) -> bool:
     return bool(today_low <= prior_low)
 
 
+def _breakdown_depth(daily_df: pd.DataFrame, as_of: date) -> float:
+    """How far below the prior 252-day low `as_of`'s own Low broke -- e.g. 0.03
+    means 3% below the prior floor. Used to prioritize when capital is limited
+    and multiple stocks trigger the same day; assumes is_fresh_52w_low(daily_df,
+    as_of) is already True (only called on symbols that passed that check)."""
+    hist = daily_df[daily_df.index.date < as_of]
+    prior_low = hist["Low"].tail(FIFTY_TWO_WEEK_LOOKBACK).min()
+    today_low = daily_df[daily_df.index.date == as_of]["Low"].iloc[0]
+    return float((prior_low - today_low) / prior_low)
+
+
 def screen_52w_low_entries(daily_data: dict[str, pd.DataFrame], as_of: date) -> list[str]:
     """All symbols (no top-N cap -- a fresh 52-week low is a specific,
     self-limiting event, not a ranked shortlist) that printed a fresh
-    52-week low on `as_of`."""
-    return [sym for sym, df in daily_data.items() if is_fresh_52w_low(df, as_of)]
+    52-week low on `as_of`, ordered by breakdown depth (biggest breach of
+    the prior 52-week floor first). This ordering only matters when the
+    caller has a capital constraint and can't take every signal -- with
+    unlimited capital every triggered symbol gets entered regardless of
+    order, so this is a no-op change for any uncapped backtest."""
+    triggered = [sym for sym, df in daily_data.items() if is_fresh_52w_low(df, as_of)]
+    return sorted(triggered, key=lambda sym: _breakdown_depth(daily_data[sym], as_of), reverse=True)
 
 
 def _ema(series: pd.Series, span: int) -> pd.Series:

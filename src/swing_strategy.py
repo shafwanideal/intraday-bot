@@ -98,6 +98,7 @@ class SwingEngine:
         trailing_pct: float = TRAILING_PCT,
         atr_multiplier: float | None = None,
         apply_costs: bool = True,
+        max_total_capital: float | None = None,
     ):
         self.capital_per_leg = capital_per_leg
         self.averaging_drop_pct = averaging_drop_pct
@@ -109,11 +110,27 @@ class SwingEngine:
         # fall back to the percentage-based trail even when this is set.
         self.atr_multiplier = atr_multiplier
         self.apply_costs = apply_costs
+        # Hard ceiling on TOTAL capital committed across every open position's every leg,
+        # combined -- added 2026-09-02 after backtests showed peak concurrent capital
+        # requirements of 10-100x a real Rs 15,00,000 budget with no cap at all. None means
+        # uncapped (old behavior). Both a brand-new entry AND an averaging leg on an
+        # existing position are refused if they'd push total committed capital past this.
+        self.max_total_capital = max_total_capital
         self.open_positions: dict[str, SwingPosition] = {}
         self.closed_trades: list[dict] = []
 
+    def total_capital_committed(self) -> float:
+        return sum(sum(p * q for p, q, _ in pos.legs) for pos in self.open_positions.values())
+
+    def _capital_available_for(self, cost: float) -> bool:
+        if self.max_total_capital is None:
+            return True
+        return self.total_capital_committed() + cost <= self.max_total_capital
+
     def can_enter(self, symbol: str) -> bool:
-        return symbol not in self.open_positions
+        if symbol in self.open_positions:
+            return False
+        return self._capital_available_for(self.capital_per_leg)
 
     def enter(self, symbol: str, price: float, date, atr: float | None = None) -> bool:
         if not self.can_enter(symbol):
@@ -183,5 +200,9 @@ class SwingEngine:
             return None
 
         if price <= pos.last_leg_price * (1 - self.averaging_drop_pct):
-            pos.legs.append((price, pos.entry_qty, date))
+            leg_cost = price * pos.entry_qty
+            if self._capital_available_for(leg_cost):
+                pos.legs.append((price, pos.entry_qty, date))
+            # else: no capital available -- skip this averaging leg, position stays as-is
+            # and gets re-checked on later days (capital may free up as other positions close).
         return None

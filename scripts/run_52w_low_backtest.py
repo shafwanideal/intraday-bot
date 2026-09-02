@@ -10,8 +10,11 @@ Capital per leg, the entry-window length, and the universe are all CLI args
 (see the DEFAULT_* constants) rather than fixed, since these get re-run
 with different real capital plans and universes.
 
-Usage: python3 scripts/run_52w_low_backtest.py [capital_per_leg] [lookback_trading_days] [universe]
+Usage: python3 scripts/run_52w_low_backtest.py [capital_per_leg] [lookback_trading_days] [universe] [max_total_capital]
   universe: nifty50 (default) | nifty200 | nifty500
+  max_total_capital: hard cap on TOTAL capital committed across everything at once
+    (entries AND averaging legs are refused once this would be exceeded). Omit for
+    uncapped (old behavior).
 """
 
 import sys
@@ -40,6 +43,7 @@ def main() -> None:
     capital_per_leg = float(sys.argv[1]) if len(sys.argv) > 1 else DEFAULT_CAPITAL_PER_LEG
     lookback_trading_days = int(sys.argv[2]) if len(sys.argv) > 2 else DEFAULT_LOOKBACK_TRADING_DAYS
     universe = sys.argv[3] if len(sys.argv) > 3 else DEFAULT_UNIVERSE
+    max_total_capital = float(sys.argv[4]) if len(sys.argv) > 4 else None
 
     symbols = UNIVERSE_LOADERS[universe]()
     print(f"Universe: {len(symbols)} {universe} symbols")
@@ -58,7 +62,9 @@ def main() -> None:
     print(f"Entry window: {entry_window[0]} to {entry_window[-1]} ({len(entry_window)} trading days)")
     print(f"Positions carried forward through: {all_dates[-1]} (latest available data)")
 
-    engine = swing_strategy.SwingEngine(capital_per_leg=capital_per_leg, atr_multiplier=ATR_MULTIPLIER)
+    engine = swing_strategy.SwingEngine(
+        capital_per_leg=capital_per_leg, atr_multiplier=ATR_MULTIPLIER, max_total_capital=max_total_capital
+    )
     entry_window_set = set(entry_window)
 
     # Track total capital deployed across ALL open positions on every date, to find the
@@ -66,17 +72,24 @@ def main() -> None:
     capital_by_date: list[tuple] = []
 
     fifty_two_week_low_events = 0
+    skipped_no_capital = 0
     for d in all_dates:
         if d >= entry_window[0]:
             if d in entry_window_set:
+                # Ordered by breakdown depth (biggest breach first) -- matters when
+                # capital is capped and not every signal can be taken the same day.
                 triggered = screener.screen_52w_low_entries(daily_data, d)
                 fifty_two_week_low_events += len(triggered)
                 for sym in triggered:
-                    if engine.can_enter(sym):
-                        day_rows = daily_data[sym][daily_data[sym].index.date == d]
-                        if not day_rows.empty:
-                            atr = indicators.atr(daily_data[sym][daily_data[sym].index.date < d], period=ATR_PERIOD)
-                            engine.enter(sym, float(day_rows.iloc[0]["Close"]), d, atr=atr)
+                    if sym in engine.open_positions:
+                        continue
+                    if not engine.can_enter(sym):
+                        skipped_no_capital += 1
+                        continue
+                    day_rows = daily_data[sym][daily_data[sym].index.date == d]
+                    if not day_rows.empty:
+                        atr = indicators.atr(daily_data[sym][daily_data[sym].index.date < d], period=ATR_PERIOD)
+                        engine.enter(sym, float(day_rows.iloc[0]["Close"]), d, atr=atr)
 
             for sym in list(engine.open_positions.keys()):
                 if sym not in daily_data:
@@ -92,16 +105,19 @@ def main() -> None:
             capital_by_date.append((d, total_capital_today, list(engine.open_positions.keys())))
 
     print(f"Total fresh-52w-low events in the entry window: {fifty_two_week_low_events}")
+    if max_total_capital is not None:
+        print(f"Signals SKIPPED due to the Rs {max_total_capital:,.0f} capital cap: {skipped_no_capital}")
 
     trades = engine.closed_trades
     still_open = engine.open_positions
 
     print(f"\n{'=' * 70}")
     print(f"52-week-low entry backtest ({universe}, unlimited-leg averaging, ATR trailing)")
+    cap_str = f"Rs {max_total_capital:,.0f}" if max_total_capital is not None else "UNCAPPED"
     print(
         f"Capital per leg: Rs {capital_per_leg:,.0f}  Averaging drop: {swing_strategy.AVERAGING_DROP_PCT:.0%}  "
         f"Trail activates: {swing_strategy.PROFIT_TARGET_PCT:.0%}  ATR multiplier: {ATR_MULTIPLIER}x  "
-        f"Window: {lookback_trading_days} trading days"
+        f"Window: {lookback_trading_days} trading days  Max total capital: {cap_str}"
     )
     print(f"{'=' * 70}\n")
 
