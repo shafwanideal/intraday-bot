@@ -6,8 +6,11 @@ position is 2% above its current blended average, then trail using ATR
 uses, since no multiplier was specified here either). No square-off --
 this is swing/positional (CNC or MTF, not MIS).
 
-Capital per leg: Rs 2,00,000, matching the user's stated large-cap MTF
-plan (Rs 50,000 own capital x ~4x MTF).
+Capital per leg and the entry-window length are both CLI args (see
+DEFAULT_CAPITAL_PER_LEG / DEFAULT_LOOKBACK_TRADING_DAYS) rather than fixed,
+since these get re-run with different real capital plans.
+
+Usage: python3 scripts/run_52w_low_backtest.py [capital_per_leg] [lookback_trading_days]
 """
 
 import sys
@@ -18,13 +21,17 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from src import indicators, kite_data, screener, swing_strategy
 
-LOOKBACK_TRADING_DAYS = 60  # window over which NEW entries (fresh 52w lows) are allowed
-DAILY_HISTORY_DAYS = 500
+DEFAULT_CAPITAL_PER_LEG = 200_000
+DEFAULT_LOOKBACK_TRADING_DAYS = 60  # window over which NEW entries (fresh 52w lows) are allowed
+DAILY_HISTORY_DAYS = 650  # covers a 6-month (~126 trading day) entry window + the 252-day 52w lookback + buffer
 ATR_MULTIPLIER = 0.5
 ATR_PERIOD = 14
 
 
 def main() -> None:
+    capital_per_leg = float(sys.argv[1]) if len(sys.argv) > 1 else DEFAULT_CAPITAL_PER_LEG
+    lookback_trading_days = int(sys.argv[2]) if len(sys.argv) > 2 else DEFAULT_LOOKBACK_TRADING_DAYS
+
     symbols = screener.load_nifty50_symbols()
     print(f"Universe: {len(symbols)} Nifty 50 (large cap) symbols")
 
@@ -38,12 +45,16 @@ def main() -> None:
     print(f"Got data for {len(daily_data)}/{len(symbols)} symbols")
 
     all_dates = sorted({d for df in daily_data.values() for d in df.index.date})
-    entry_window = all_dates[-LOOKBACK_TRADING_DAYS:]
+    entry_window = all_dates[-lookback_trading_days:]
     print(f"Entry window: {entry_window[0]} to {entry_window[-1]} ({len(entry_window)} trading days)")
     print(f"Positions carried forward through: {all_dates[-1]} (latest available data)")
 
-    engine = swing_strategy.SwingEngine(atr_multiplier=ATR_MULTIPLIER)
+    engine = swing_strategy.SwingEngine(capital_per_leg=capital_per_leg, atr_multiplier=ATR_MULTIPLIER)
     entry_window_set = set(entry_window)
+
+    # Track total capital deployed across ALL open positions on every date, to find the
+    # real peak concurrent capital requirement -- not just what's open at the very end.
+    capital_by_date: list[tuple] = []
 
     fifty_two_week_low_events = 0
     for d in all_dates:
@@ -66,6 +77,11 @@ def main() -> None:
                     continue
                 engine.update(sym, float(day_rows.iloc[0]["Close"]), d)
 
+            total_capital_today = sum(
+                sum(p * q for p, q, _ in pos.legs) for pos in engine.open_positions.values()
+            )
+            capital_by_date.append((d, total_capital_today, list(engine.open_positions.keys())))
+
     print(f"Total fresh-52w-low events in the entry window: {fifty_two_week_low_events}")
 
     trades = engine.closed_trades
@@ -74,8 +90,9 @@ def main() -> None:
     print(f"\n{'=' * 70}")
     print("52-week-low entry backtest (Nifty 50, unlimited-leg averaging, ATR trailing)")
     print(
-        f"Capital per leg: Rs {swing_strategy.CAPITAL_PER_LEG:,}  Averaging drop: {swing_strategy.AVERAGING_DROP_PCT:.0%}  "
-        f"Trail activates: {swing_strategy.PROFIT_TARGET_PCT:.0%}  ATR multiplier: {ATR_MULTIPLIER}x"
+        f"Capital per leg: Rs {capital_per_leg:,.0f}  Averaging drop: {swing_strategy.AVERAGING_DROP_PCT:.0%}  "
+        f"Trail activates: {swing_strategy.PROFIT_TARGET_PCT:.0%}  ATR multiplier: {ATR_MULTIPLIER}x  "
+        f"Window: {lookback_trading_days} trading days"
     )
     print(f"{'=' * 70}\n")
 
@@ -88,39 +105,59 @@ def main() -> None:
         print(f"Total realized net P&L: Rs {total_net:,.2f}")
         print(f"Win rate: {len(wins)}/{len(trades)} ({100*len(wins)/len(trades):.1f}%)")
         print(f"Avg legs per closed trade: {avg_legs:.1f}  Avg holding period: {avg_hold_days:.1f} calendar days")
-        print("\n--- Closed trades ---")
-        for t in sorted(trades, key=lambda x: x["entry_date"]):
-            print(
-                f"{t['symbol']:12s} {t['entry_date']} -> {t['exit_date']}  legs={t['legs']}  "
-                f"avg={t['avg_price']:.2f} exit={t['exit_price']:.2f}  capital=Rs {t['capital_deployed']:>10,.0f}  "
-                f"net=Rs {t['pnl']:>9,.2f}"
-            )
 
-    print(f"\nStill-open positions: {len(still_open)}")
+    print(f"\nStill-open positions (STUCK -- never hit +2% and trailing-stopped out): {len(still_open)}")
+    total_unrealized = 0.0
     if still_open:
-        total_unrealized = 0.0
-        total_capital_committed = 0.0
         armed_count = sum(1 for pos in still_open.values() if pos.trailing)
-        print(f"  ({armed_count} armed/trailing, {len(still_open) - armed_count} still averaging/waiting)")
+        print(f"  ({armed_count} currently armed/trailing, {len(still_open) - armed_count} still averaging/waiting for +2%)")
         for sym, pos in still_open.items():
             last_close = float(daily_data[sym].iloc[-1]["Close"])
             unrealized = (last_close - pos.avg_price) * pos.qty
             capital = sum(p * q for p, q, _ in pos.legs)
             total_unrealized += unrealized
-            total_capital_committed += capital
-            trail_tag = f" [TRAILING, peak={pos.peak_price:.2f}]" if pos.trailing else ""
+            trail_tag = " [TRAILING]" if pos.trailing else ""
             print(
                 f"  {sym:12s} entered {pos.legs[0][2]}  legs={len(pos.legs)}  avg={pos.avg_price:.2f}{trail_tag}  "
-                f"last_close={last_close:.2f}  capital=Rs {capital:>10,.0f}  unrealized=Rs {unrealized:>9,.2f}"
+                f"last_close={last_close:.2f}  capital=Rs {capital:>12,.0f}  unrealized=Rs {unrealized:>10,.2f}"
             )
-        print(f"\nTotal capital still committed (open positions): Rs {total_capital_committed:,.2f}")
-        print(f"Total unrealized P&L (open positions, mark-to-market): Rs {total_unrealized:,.2f}")
 
     total_net = sum(t["pnl"] for t in trades) if trades else 0.0
-    total_unrealized = sum(
-        (float(daily_data[sym].iloc[-1]["Close"]) - pos.avg_price) * pos.qty for sym, pos in still_open.items()
-    )
     print(f"\nCOMBINED (realized + unrealized, mark-to-market today): Rs {total_net + total_unrealized:,.2f}")
+
+    if capital_by_date:
+        peak_date, peak_capital, peak_symbols = max(capital_by_date, key=lambda x: x[1])
+        print(f"\nPEAK concurrent capital deployed: Rs {peak_capital:,.2f} on {peak_date}")
+        print(f"  Positions open then: {peak_symbols}")
+
+    # --- Per-stock detailed report ---
+    print(f"\n{'=' * 70}\nPER-STOCK REPORT\n{'=' * 70}")
+    all_symbols = sorted(set([t["symbol"] for t in trades]) | set(still_open.keys()))
+    for sym in all_symbols:
+        sym_trades = [t for t in trades if t["symbol"] == sym]
+        realized = sum(t["pnl"] for t in sym_trades)
+        wins = sum(1 for t in sym_trades if t["pnl"] > 0)
+        status = "OPEN" if sym in still_open else "flat"
+        print(f"\n{sym} -- {len(sym_trades)} closed round-trip(s), status: {status}")
+        if sym_trades:
+            print(f"  Realized: Rs {realized:,.2f}  ({wins}/{len(sym_trades)} won)")
+            for t in sorted(sym_trades, key=lambda x: x["entry_date"]):
+                print(
+                    f"    {t['entry_date']} -> {t['exit_date']}  legs={t['legs']}  avg={t['avg_price']:.2f} "
+                    f"exit={t['exit_price']:.2f}  net=Rs {t['pnl']:>9,.2f}"
+                )
+        if sym in still_open:
+            pos = still_open[sym]
+            last_close = float(daily_data[sym].iloc[-1]["Close"])
+            unrealized = (last_close - pos.avg_price) * pos.qty
+            capital = sum(p * q for p, q, _ in pos.legs)
+            trail_state = "ARMED/TRAILING" if pos.trailing else "still averaging/waiting for +2%"
+            print(
+                f"  CURRENTLY OPEN ({trail_state}): entered {pos.legs[0][2]}, {len(pos.legs)} leg(s), "
+                f"avg={pos.avg_price:.2f}, last_close={last_close:.2f}, capital=Rs {capital:,.0f}, "
+                f"unrealized=Rs {unrealized:,.2f}"
+            )
+            print(f"  Legs: {[(round(p,2), q, str(dt)) for p, q, dt in pos.legs]}")
 
     print(
         "\nCAVEATS:\n"
