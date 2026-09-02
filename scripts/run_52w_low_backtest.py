@@ -1,20 +1,23 @@
-"""Backtest requested 2026-09-02: Nifty 50 only (large cap), enter whenever
-a stock prints a FRESH 52-week low, average down every 3% further fall
-(unlimited legs, same share qty per leg), arm a trailing stop once the
-position is 2% above its current blended average, then trail using ATR
-(0.5x 14-day ATR by default -- same multiplier the intraday strategy
-uses, since no multiplier was specified here either). No square-off --
-this is swing/positional (CNC or MTF, not MIS).
+"""Backtest the grid-averaging/2%-trail swing strategy against a choice of
+entry trigger (see TRIGGER_SCREENERS): enter whenever a stock's own trigger
+condition fires, average down every 3% further fall (unlimited legs, same
+share qty per leg), arm a trailing stop once the position is 2% above its
+current blended average, then trail using ATR (0.5x 14-day ATR by default).
+No square-off -- this is swing/positional (CNC or MTF, not MIS).
 
-Capital per leg, the entry-window length, and the universe are all CLI args
-(see the DEFAULT_* constants) rather than fixed, since these get re-run
-with different real capital plans and universes.
+Capital per leg, the entry-window length, the universe, and the trigger are
+all CLI args (see the DEFAULT_* constants) rather than fixed, since these
+get re-run with different real capital plans, universes, and (2026-09-02)
+entry triggers for direct comparison.
 
-Usage: python3 scripts/run_52w_low_backtest.py [capital_per_leg] [lookback_trading_days] [universe] [max_total_capital]
+Usage: python3 scripts/run_52w_low_backtest.py [capital_per_leg] [lookback_trading_days] [universe] [max_total_capital] [trigger]
   universe: nifty50 (default) | nifty200 | nifty500
   max_total_capital: hard cap on TOTAL capital committed across everything at once
     (entries AND averaging legs are refused once this would be exceeded). Omit for
     uncapped (old behavior).
+  trigger: 52w_low (default) | rsi_dip -- rsi_dip enters on RSI(14)<=30 while price
+    is still above its 200-day EMA (a real uptrend), instead of any fresh 52-week low
+    regardless of the stock's underlying trend.
 """
 
 import sys
@@ -26,9 +29,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from src import indicators, kite_data, screener, swing_strategy
 
 DEFAULT_CAPITAL_PER_LEG = 200_000
-DEFAULT_LOOKBACK_TRADING_DAYS = 60  # window over which NEW entries (fresh 52w lows) are allowed
+DEFAULT_LOOKBACK_TRADING_DAYS = 60  # window over which NEW entries are allowed
 DEFAULT_UNIVERSE = "nifty50"
-DAILY_HISTORY_DAYS = 850  # covers up to a 1-year (~252 trading day) entry window + the 252-day 52w lookback + buffer
+DEFAULT_TRIGGER = "52w_low"
+DAILY_HISTORY_DAYS = 850  # covers up to a 1-year (~252 trading day) entry window + the 252-day lookback + buffer
 ATR_MULTIPLIER = 0.5
 ATR_PERIOD = 14
 
@@ -38,12 +42,24 @@ UNIVERSE_LOADERS = {
     "nifty500": screener.load_nifty500_symbols,
 }
 
+TRIGGER_SCREENERS = {
+    "52w_low": screener.screen_52w_low_entries,
+    "rsi_dip": screener.screen_rsi_dip_entries,
+}
+
+TRIGGER_LABELS = {
+    "52w_low": "fresh 52-week low",
+    "rsi_dip": "RSI(14)<=30 oversold while above 200-day EMA",
+}
+
 
 def main() -> None:
     capital_per_leg = float(sys.argv[1]) if len(sys.argv) > 1 else DEFAULT_CAPITAL_PER_LEG
     lookback_trading_days = int(sys.argv[2]) if len(sys.argv) > 2 else DEFAULT_LOOKBACK_TRADING_DAYS
     universe = sys.argv[3] if len(sys.argv) > 3 else DEFAULT_UNIVERSE
     max_total_capital = float(sys.argv[4]) if len(sys.argv) > 4 else None
+    trigger = sys.argv[5] if len(sys.argv) > 5 else DEFAULT_TRIGGER
+    screen_entries = TRIGGER_SCREENERS[trigger]
 
     symbols = UNIVERSE_LOADERS[universe]()
     print(f"Universe: {len(symbols)} {universe} symbols")
@@ -71,15 +87,15 @@ def main() -> None:
     # real peak concurrent capital requirement -- not just what's open at the very end.
     capital_by_date: list[tuple] = []
 
-    fifty_two_week_low_events = 0
+    total_trigger_events = 0
     skipped_no_capital = 0
     for d in all_dates:
         if d >= entry_window[0]:
             if d in entry_window_set:
-                # Ordered by breakdown depth (biggest breach first) -- matters when
-                # capital is capped and not every signal can be taken the same day.
-                triggered = screener.screen_52w_low_entries(daily_data, d)
-                fifty_two_week_low_events += len(triggered)
+                # Ordered by signal strength (deepest breakdown / most oversold first) --
+                # matters when capital is capped and not every signal can be taken the same day.
+                triggered = screen_entries(daily_data, d)
+                total_trigger_events += len(triggered)
                 for sym in triggered:
                     if sym in engine.open_positions:
                         continue
@@ -104,7 +120,7 @@ def main() -> None:
             )
             capital_by_date.append((d, total_capital_today, list(engine.open_positions.keys())))
 
-    print(f"Total fresh-52w-low events in the entry window: {fifty_two_week_low_events}")
+    print(f"Total trigger events ({TRIGGER_LABELS[trigger]}) in the entry window: {total_trigger_events}")
     if max_total_capital is not None:
         print(f"Signals SKIPPED due to the Rs {max_total_capital:,.0f} capital cap: {skipped_no_capital}")
 
@@ -112,7 +128,7 @@ def main() -> None:
     still_open = engine.open_positions
 
     print(f"\n{'=' * 70}")
-    print(f"52-week-low entry backtest ({universe}, unlimited-leg averaging, ATR trailing)")
+    print(f"{trigger} entry backtest ({universe}, unlimited-leg averaging, ATR trailing)")
     cap_str = f"Rs {max_total_capital:,.0f}" if max_total_capital is not None else "UNCAPPED"
     print(
         f"Capital per leg: Rs {capital_per_leg:,.0f}  Averaging drop: {swing_strategy.AVERAGING_DROP_PCT:.0%}  "

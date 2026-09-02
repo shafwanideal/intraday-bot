@@ -16,11 +16,24 @@ from pathlib import Path
 
 import pandas as pd
 
+from . import indicators
+
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 NIFTY200_CSV = DATA_DIR / "nifty200.csv"
 NIFTY50_CSV = DATA_DIR / "nifty50.csv"
 NIFTY500_CSV = DATA_DIR / "nifty500.csv"
 FIFTY_TWO_WEEK_LOOKBACK = 252  # trading days
+
+# RSI-oversold-in-uptrend entry: "buy a real dip in a healthy stock" instead of
+# "buy any stock that just hit a fresh 52-week low" -- the 52w-low approach caught
+# stocks in genuine structural decline (ITC, WIPRO across a full year of backtests)
+# just as readily as stocks having a temporary pullback, since a fresh low doesn't
+# distinguish the two. Requiring price to still be above its 200-day EMA filters
+# out the former: a stock below its own 200-EMA is, by definition, in a downtrend
+# on that timeframe, not a dip.
+RSI_PERIOD = 14
+RSI_OVERSOLD_THRESHOLD = 30
+UPTREND_EMA_PERIOD = 200
 
 # How close to the 52-week high counts as "reasonably close" -- within 10%.
 NEAR_52W_HIGH_PCT = 0.10
@@ -168,3 +181,44 @@ def screen_day(daily_data: dict[str, pd.DataFrame], as_of: date, top_n: int = 3)
             candidates.append((symbol, m["volume"]))
     candidates.sort(key=lambda x: x[1], reverse=True)
     return [sym for sym, _ in candidates[:top_n]]
+
+
+def is_rsi_oversold_in_uptrend(
+    daily_df: pd.DataFrame,
+    as_of: date,
+    rsi_period: int = RSI_PERIOD,
+    rsi_threshold: float = RSI_OVERSOLD_THRESHOLD,
+    ema_period: int = UPTREND_EMA_PERIOD,
+) -> bool:
+    """True if, using only data strictly BEFORE `as_of` (no lookahead --
+    matches compute_screen_metrics' convention, unlike is_fresh_52w_low which
+    deliberately uses the trigger day's own row):
+    - RSI(rsi_period) is at or below rsi_threshold (oversold), AND
+    - Close is still above its ema_period-day EMA (the long-term trend is
+      still intact -- this is what filters out a stock in genuine structural
+      decline, which a pure oversold reading alone does not).
+    Returns False if there isn't enough history for either indicator yet.
+    """
+    hist = daily_df[daily_df.index.date < as_of]
+    if len(hist) <= max(rsi_period, ema_period):
+        return False
+    r = indicators.rsi(hist, period=rsi_period)
+    if r is None or r > rsi_threshold:
+        return False
+    ema = hist["Close"].ewm(span=ema_period, adjust=False).mean().iloc[-1]
+    return bool(hist["Close"].iloc[-1] > ema)
+
+
+def _rsi_depth(daily_df: pd.DataFrame, as_of: date, rsi_period: int = RSI_PERIOD) -> float:
+    """How oversold, for prioritizing when capital is limited -- lower RSI = higher priority."""
+    hist = daily_df[daily_df.index.date < as_of]
+    r = indicators.rsi(hist, period=rsi_period)
+    return -r if r is not None else 0.0  # negate so sorting descending puts the MOST oversold first
+
+
+def screen_rsi_dip_entries(daily_data: dict[str, pd.DataFrame], as_of: date) -> list[str]:
+    """All symbols (no top-N cap, same reasoning as screen_52w_low_entries)
+    that are RSI-oversold while still in an intact long-term uptrend as of
+    `as_of`, ordered most-oversold first."""
+    triggered = [sym for sym, df in daily_data.items() if is_rsi_oversold_in_uptrend(df, as_of)]
+    return sorted(triggered, key=lambda sym: _rsi_depth(daily_data[sym], as_of), reverse=True)
