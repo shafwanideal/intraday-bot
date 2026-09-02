@@ -28,7 +28,7 @@ from src import indicators, kite_data, screener, swing_strategy
 DEFAULT_CAPITAL_PER_LEG = 200_000
 DEFAULT_LOOKBACK_TRADING_DAYS = 60  # window over which NEW entries (fresh 52w lows) are allowed
 DEFAULT_UNIVERSE = "nifty50"
-DAILY_HISTORY_DAYS = 650  # covers a 6-month (~126 trading day) entry window + the 252-day 52w lookback + buffer
+DAILY_HISTORY_DAYS = 850  # covers up to a 1-year (~252 trading day) entry window + the 252-day 52w lookback + buffer
 ATR_MULTIPLIER = 0.5
 ATR_PERIOD = 14
 
