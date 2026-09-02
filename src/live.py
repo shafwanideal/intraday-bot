@@ -101,16 +101,33 @@ def _fetch_margin_capital(kite) -> float:
 
 
 def _fetch_realized_pnl_today(kite) -> float:
-    """Today's already-realized intraday P&L (from Kite's own margin ledger),
-    so a restarted session's daily_pnl starts from the true full-day total
-    instead of resetting to 0. Without this, every restart makes both the
-    daily loss cap and the portfolio profit lock blind to whatever was
-    already booked before the restart -- found for real on 2026-08-28, where
-    a restart reset ~Rs 2,609 of already-realized profit out of the profit
-    lock's view entirely. Falls back to 0.0 (old behavior) if the margins
-    call fails, rather than blocking a restart over a transient API issue."""
+    """Today's already-realized intraday P&L, summed only over symbols Kite
+    shows as fully squared off (net quantity 0) in kite.positions()["day"] --
+    so a restarted session's daily_pnl starts from the true full-day realized
+    total instead of resetting to 0. Deliberately excludes any symbol still
+    showing an open quantity: that P&L is unrealized and the engine already
+    recomputes it live from reconciled open positions -- including it here
+    too would double-count it in check_loss_cap / check_portfolio_profit_lock.
+
+    Switched 2026-09-02 from kite.margins()["equity"]["utilised"]["m2m_realised"],
+    which was found to read back 0 all day on 2026-09-01 despite a real -Rs
+    3,341 already booked (verified by hand from the raw order fills) -- that
+    field is not reliable for this account/segment. positions()["day"]["pnl"]
+    was cross-checked against a manual entry/exit calc for a real closed
+    trade the same morning (COALINDIA, +Rs 812.20) and matched exactly.
+
+    Without this seeding entirely, every restart makes both the daily loss
+    cap and the portfolio profit lock blind to whatever was already booked
+    before the restart -- found for real on 2026-08-28, where a restart reset
+    ~Rs 2,609 of already-realized profit out of the profit lock's view
+    entirely. Falls back to 0.0 (old behavior) if the API call fails, rather
+    than blocking a restart over a transient issue."""
     try:
-        return float(kite.margins()["equity"]["utilised"]["m2m_realised"])
+        return sum(
+            float(p["pnl"])
+            for p in kite.positions()["day"]
+            if p.get("quantity", 0) == 0
+        )
     except (KeyError, TypeError, orders.PLACEMENT_EXCEPTIONS) as exc:
         print(f"WARNING: could not fetch today's realized P&L ({exc}); daily_pnl starts at 0 -- loss cap/profit lock may be inaccurate until real trades update it.")
         return 0.0
