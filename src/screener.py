@@ -18,6 +18,8 @@ import pandas as pd
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 NIFTY200_CSV = DATA_DIR / "nifty200.csv"
+NIFTY50_CSV = DATA_DIR / "nifty50.csv"
+FIFTY_TWO_WEEK_LOOKBACK = 252  # trading days
 
 # How close to the 52-week high counts as "reasonably close" -- within 10%.
 NEAR_52W_HIGH_PCT = 0.10
@@ -36,6 +38,37 @@ def load_nifty200_symbols() -> list[str]:
     treat this as a snapshot, not a live feed."""
     with open(NIFTY200_CSV) as f:
         return [row["Symbol"] for row in csv.DictReader(f)]
+
+
+def load_nifty50_symbols() -> list[str]:
+    """Nifty 50 constituents, same point-in-time-snapshot caveat as load_nifty200_symbols."""
+    with open(NIFTY50_CSV) as f:
+        return [row["Symbol"] for row in csv.DictReader(f)]
+
+
+def is_fresh_52w_low(daily_df: pd.DataFrame, as_of: date) -> bool:
+    """True if `as_of`'s own Low is at or below the lowest Low of the prior
+    FIFTY_TWO_WEEK_LOOKBACK trading days (i.e. a NEW 52-week low printed on
+    that day, not just "currently near" one). Uses `as_of`'s own row
+    deliberately (unlike compute_screen_metrics, which excludes it) --
+    hitting a fresh low IS the event being detected, not something to
+    predict from prior days alone. Returns False if there isn't enough
+    prior history yet."""
+    if as_of not in daily_df.index.date:
+        return False
+    hist = daily_df[daily_df.index.date < as_of]
+    if len(hist) < FIFTY_TWO_WEEK_LOOKBACK:
+        return False
+    prior_low = hist["Low"].tail(FIFTY_TWO_WEEK_LOOKBACK).min()
+    today_low = daily_df[daily_df.index.date == as_of]["Low"].iloc[0]
+    return bool(today_low <= prior_low)
+
+
+def screen_52w_low_entries(daily_data: dict[str, pd.DataFrame], as_of: date) -> list[str]:
+    """All symbols (no top-N cap -- a fresh 52-week low is a specific,
+    self-limiting event, not a ranked shortlist) that printed a fresh
+    52-week low on `as_of`."""
+    return [sym for sym, df in daily_data.items() if is_fresh_52w_low(df, as_of)]
 
 
 def _ema(series: pd.Series, span: int) -> pd.Series:

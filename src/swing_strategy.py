@@ -58,6 +58,7 @@ class SwingPosition:
     entry_qty: int = 0  # fixed share count reused for every averaging leg
     trailing: bool = False  # armed once price first hits PROFIT_TARGET_PCT above avg_price
     peak_price: float | None = None  # best close seen since trailing armed
+    atr: float | None = None  # this symbol's ATR at entry, if using ATR-based trailing
 
     @property
     def qty(self) -> int:
@@ -95,12 +96,18 @@ class SwingEngine:
         averaging_drop_pct: float = AVERAGING_DROP_PCT,
         profit_target_pct: float = PROFIT_TARGET_PCT,
         trailing_pct: float = TRAILING_PCT,
+        atr_multiplier: float | None = None,
         apply_costs: bool = True,
     ):
         self.capital_per_leg = capital_per_leg
         self.averaging_drop_pct = averaging_drop_pct
         self.profit_target_pct = profit_target_pct
         self.trailing_pct = trailing_pct
+        # If set, trail distance = atr_multiplier * the symbol's ATR (absolute price
+        # units, passed to enter()) instead of trailing_pct -- same convention as the
+        # intraday GridEngine's atr_multiplier. Symbols entered without an atr value
+        # fall back to the percentage-based trail even when this is set.
+        self.atr_multiplier = atr_multiplier
         self.apply_costs = apply_costs
         self.open_positions: dict[str, SwingPosition] = {}
         self.closed_trades: list[dict] = []
@@ -108,13 +115,13 @@ class SwingEngine:
     def can_enter(self, symbol: str) -> bool:
         return symbol not in self.open_positions
 
-    def enter(self, symbol: str, price: float, date) -> bool:
+    def enter(self, symbol: str, price: float, date, atr: float | None = None) -> bool:
         if not self.can_enter(symbol):
             return False
         qty = math.floor(self.capital_per_leg / price)
         if qty < 1:
             return False
-        self.open_positions[symbol] = SwingPosition(symbol=symbol, legs=[(price, qty, date)], entry_qty=qty)
+        self.open_positions[symbol] = SwingPosition(symbol=symbol, legs=[(price, qty, date)], entry_qty=qty, atr=atr)
         return True
 
     def _close(self, symbol: str, price: float, date, reason: str) -> dict:
@@ -162,7 +169,11 @@ class SwingEngine:
 
         if pos.trailing:
             pos.peak_price = max(pos.peak_price, price)
-            if price <= pos.peak_price * (1 - self.trailing_pct):
+            use_atr = self.atr_multiplier is not None and pos.atr is not None
+            stop_level = (
+                pos.peak_price - self.atr_multiplier * pos.atr if use_atr else pos.peak_price * (1 - self.trailing_pct)
+            )
+            if price <= stop_level:
                 return self._close(symbol, price, date, "trailing_stop_exit")
             return None
 
