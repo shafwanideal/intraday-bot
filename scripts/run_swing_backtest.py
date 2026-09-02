@@ -69,11 +69,14 @@ def main() -> None:
     still_open = engine.open_positions
 
     print(f"\n{'=' * 70}")
-    print("Swing-averaging backtest (unlimited legs, 3% add / 2% target, no square-off)")
-    print(f"Capital per leg: Rs {swing_strategy.CAPITAL_PER_LEG:,}  Averaging drop: {swing_strategy.AVERAGING_DROP_PCT:.0%}  Profit target: {swing_strategy.PROFIT_TARGET_PCT:.0%}")
+    print("Swing-averaging backtest (unlimited legs, 3% add / 2% arms trailing stop, no square-off)")
+    print(
+        f"Capital per leg: Rs {swing_strategy.CAPITAL_PER_LEG:,}  Averaging drop: {swing_strategy.AVERAGING_DROP_PCT:.0%}  "
+        f"Trail activates: {swing_strategy.PROFIT_TARGET_PCT:.0%}  Trail distance: {engine.trailing_pct:.0%}"
+    )
     print(f"{'=' * 70}\n")
 
-    print(f"Closed (target hit) trades: {len(trades)}")
+    print(f"Closed (trailing-stopped out after arming) trades: {len(trades)}")
     if trades:
         total_net = sum(t["pnl"] for t in trades)
         wins = [t for t in trades if t["pnl"] > 0]
@@ -92,18 +95,21 @@ def main() -> None:
                 f"net=Rs {t['pnl']:>9,.2f}"
             )
 
-    print(f"\nStill-open positions (never hit the 2% target by {all_dates[-1]}): {len(still_open)}")
+    print(f"\nStill-open positions (never trailing-stopped out by {all_dates[-1]}): {len(still_open)}")
     if still_open:
         total_unrealized = 0.0
         total_capital_committed = 0.0
+        armed_count = sum(1 for pos in still_open.values() if pos.trailing)
+        print(f"  ({armed_count} armed/trailing -- have hit +2% at some point; {len(still_open) - armed_count} never yet reached it)")
         for sym, pos in still_open.items():
             last_close = float(daily_data[sym].iloc[-1]["Close"])
             unrealized = (last_close - pos.avg_price) * pos.qty
             capital = sum(p * q for p, q, _ in pos.legs)
             total_unrealized += unrealized
             total_capital_committed += capital
+            trail_tag = f" [TRAILING, peak={pos.peak_price:.2f}]" if pos.trailing else ""
             print(
-                f"  {sym:12s} entered {pos.legs[0][2]}  legs={len(pos.legs)}  avg={pos.avg_price:.2f}  "
+                f"  {sym:12s} entered {pos.legs[0][2]}  legs={len(pos.legs)}  avg={pos.avg_price:.2f}{trail_tag}  "
                 f"last_close={last_close:.2f}  capital=Rs {capital:>10,.0f}  unrealized=Rs {unrealized:>9,.2f}"
             )
         print(f"\nTotal capital still committed (open positions): Rs {total_capital_committed:,.2f}")

@@ -56,6 +56,8 @@ class SwingPosition:
     symbol: str
     legs: list = field(default_factory=list)  # [(price, qty, date)]
     entry_qty: int = 0  # fixed share count reused for every averaging leg
+    trailing: bool = False  # armed once price first hits PROFIT_TARGET_PCT above avg_price
+    peak_price: float | None = None  # best close seen since trailing armed
 
     @property
     def qty(self) -> int:
@@ -70,14 +72,21 @@ class SwingPosition:
         return self.legs[-1][0]
 
 
+TRAILING_PCT = 0.01  # requested 2026-09-02: once armed at PROFIT_TARGET_PCT, trail the peak
+# instead of closing immediately. No distance was specified, so this defaults to half the
+# 2% activation threshold -- same convention already used by the intraday strategy
+# (trail_pct defaults to grid_pct / 2 there too).
+
+
 class SwingEngine:
     """One independent capital pool per stock (Rs 2,00,000-per-leg by
     default) -- NOT a shared pool across concurrent positions like the
     intraday GridEngine's unit system, since this was specified per-stock
     ("you deploy 2 lakhs each"). No square-off, no daily loss cap, no
-    stop-loss -- positions close only on hitting PROFIT_TARGET_PCT, or stay
-    open indefinitely (reported as still-open/unrealized at the end of a
-    backtest).
+    stop-loss -- once PROFIT_TARGET_PCT arms trailing, a position closes
+    only when it pulls back TRAILING_PCT from its peak since arming, or
+    stays open indefinitely (reported as still-open/unrealized at the end
+    of a backtest).
     """
 
     def __init__(
@@ -85,11 +94,13 @@ class SwingEngine:
         capital_per_leg: float = CAPITAL_PER_LEG,
         averaging_drop_pct: float = AVERAGING_DROP_PCT,
         profit_target_pct: float = PROFIT_TARGET_PCT,
+        trailing_pct: float = TRAILING_PCT,
         apply_costs: bool = True,
     ):
         self.capital_per_leg = capital_per_leg
         self.averaging_drop_pct = averaging_drop_pct
         self.profit_target_pct = profit_target_pct
+        self.trailing_pct = trailing_pct
         self.apply_costs = apply_costs
         self.open_positions: dict[str, SwingPosition] = {}
         self.closed_trades: list[dict] = []
@@ -134,13 +145,32 @@ class SwingEngine:
 
     def update(self, symbol: str, price: float, date) -> dict | None:
         """Call once per trading day (using that day's close) for each open
-        position. Checks the profit target first (using the CURRENT blended
-        average, recomputed after every leg), then averaging."""
+        position.
+
+        Once armed (price first reaches profit_target_pct above the CURRENT
+        blended average -- recomputed after every leg), the position no
+        longer closes immediately -- it trails: peak_price tracks the best
+        close since arming, and the position closes if price pulls back
+        trailing_pct from that peak. Averaging stops being checked once
+        trailing is armed, same as the intraday engine's behavior -- once a
+        position is genuinely in profit, the only decision left is when to
+        take it, not whether to add more risk to it.
+        """
         pos = self.open_positions.get(symbol)
         if pos is None:
             return None
+
+        if pos.trailing:
+            pos.peak_price = max(pos.peak_price, price)
+            if price <= pos.peak_price * (1 - self.trailing_pct):
+                return self._close(symbol, price, date, "trailing_stop_exit")
+            return None
+
         if price >= pos.avg_price * (1 + self.profit_target_pct):
-            return self._close(symbol, price, date, "profit_target")
+            pos.trailing = True
+            pos.peak_price = price
+            return None
+
         if price <= pos.last_leg_price * (1 - self.averaging_drop_pct):
             pos.legs.append((price, pos.entry_qty, date))
         return None
