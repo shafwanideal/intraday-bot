@@ -6,11 +6,12 @@ position is 2% above its current blended average, then trail using ATR
 uses, since no multiplier was specified here either). No square-off --
 this is swing/positional (CNC or MTF, not MIS).
 
-Capital per leg and the entry-window length are both CLI args (see
-DEFAULT_CAPITAL_PER_LEG / DEFAULT_LOOKBACK_TRADING_DAYS) rather than fixed,
-since these get re-run with different real capital plans.
+Capital per leg, the entry-window length, and the universe are all CLI args
+(see the DEFAULT_* constants) rather than fixed, since these get re-run
+with different real capital plans and universes.
 
-Usage: python3 scripts/run_52w_low_backtest.py [capital_per_leg] [lookback_trading_days]
+Usage: python3 scripts/run_52w_low_backtest.py [capital_per_leg] [lookback_trading_days] [universe]
+  universe: nifty50 (default) | nifty200 | nifty500
 """
 
 import sys
@@ -23,17 +24,25 @@ from src import indicators, kite_data, screener, swing_strategy
 
 DEFAULT_CAPITAL_PER_LEG = 200_000
 DEFAULT_LOOKBACK_TRADING_DAYS = 60  # window over which NEW entries (fresh 52w lows) are allowed
+DEFAULT_UNIVERSE = "nifty50"
 DAILY_HISTORY_DAYS = 650  # covers a 6-month (~126 trading day) entry window + the 252-day 52w lookback + buffer
 ATR_MULTIPLIER = 0.5
 ATR_PERIOD = 14
+
+UNIVERSE_LOADERS = {
+    "nifty50": screener.load_nifty50_symbols,
+    "nifty200": screener.load_nifty200_symbols,
+    "nifty500": screener.load_nifty500_symbols,
+}
 
 
 def main() -> None:
     capital_per_leg = float(sys.argv[1]) if len(sys.argv) > 1 else DEFAULT_CAPITAL_PER_LEG
     lookback_trading_days = int(sys.argv[2]) if len(sys.argv) > 2 else DEFAULT_LOOKBACK_TRADING_DAYS
+    universe = sys.argv[3] if len(sys.argv) > 3 else DEFAULT_UNIVERSE
 
-    symbols = screener.load_nifty50_symbols()
-    print(f"Universe: {len(symbols)} Nifty 50 (large cap) symbols")
+    symbols = UNIVERSE_LOADERS[universe]()
+    print(f"Universe: {len(symbols)} {universe} symbols")
 
     print(f"Fetching {DAILY_HISTORY_DAYS}d of daily bars for all {len(symbols)} symbols ...")
     daily_data: dict = {}
@@ -88,7 +97,7 @@ def main() -> None:
     still_open = engine.open_positions
 
     print(f"\n{'=' * 70}")
-    print("52-week-low entry backtest (Nifty 50, unlimited-leg averaging, ATR trailing)")
+    print(f"52-week-low entry backtest ({universe}, unlimited-leg averaging, ATR trailing)")
     print(
         f"Capital per leg: Rs {capital_per_leg:,.0f}  Averaging drop: {swing_strategy.AVERAGING_DROP_PCT:.0%}  "
         f"Trail activates: {swing_strategy.PROFIT_TARGET_PCT:.0%}  ATR multiplier: {ATR_MULTIPLIER}x  "

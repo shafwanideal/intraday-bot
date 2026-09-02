@@ -19,6 +19,7 @@ import pandas as pd
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 NIFTY200_CSV = DATA_DIR / "nifty200.csv"
 NIFTY50_CSV = DATA_DIR / "nifty50.csv"
+NIFTY500_CSV = DATA_DIR / "nifty500.csv"
 FIFTY_TWO_WEEK_LOOKBACK = 252  # trading days
 
 # How close to the 52-week high counts as "reasonably close" -- within 10%.
@@ -43,6 +44,12 @@ def load_nifty200_symbols() -> list[str]:
 def load_nifty50_symbols() -> list[str]:
     """Nifty 50 constituents, same point-in-time-snapshot caveat as load_nifty200_symbols."""
     with open(NIFTY50_CSV) as f:
+        return [row["Symbol"] for row in csv.DictReader(f)]
+
+
+def load_nifty500_symbols() -> list[str]:
+    """Nifty 500 constituents, same point-in-time-snapshot caveat as load_nifty200_symbols."""
+    with open(NIFTY500_CSV) as f:
         return [row["Symbol"] for row in csv.DictReader(f)]
 
 
