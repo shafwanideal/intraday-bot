@@ -447,7 +447,16 @@ def run_live(poll_interval: int = POLL_INTERVAL_SECONDS) -> None:
         enable_averaging=ENABLE_AVERAGING,
         trail_stop=TRAIL_STOP,
         profit_exit=PROFIT_EXIT,
-        portfolio_profit_lock_trigger=PORTFOLIO_PROFIT_LOCK_TRIGGER,
+        # PORTFOLIO_PROFIT_LOCK_TRIGGER_OVERRIDE (env var, not .env -- a deliberate
+        # one-time choice per session start, same pattern as FRESH_LOSS_BUDGET) lets
+        # today's floor be set to something other than the standing default without
+        # editing strategy.py -- requested 2026-09-02 ("change today's floor as 500
+        # total P&L").
+        portfolio_profit_lock_trigger=(
+            float(os.environ["PORTFOLIO_PROFIT_LOCK_TRIGGER_OVERRIDE"])
+            if os.environ.get("PORTFOLIO_PROFIT_LOCK_TRIGGER_OVERRIDE", "").strip()
+            else PORTFOLIO_PROFIT_LOCK_TRIGGER
+        ),
         portfolio_profit_lock_giveback=PORTFOLIO_PROFIT_LOCK_GIVEBACK,
         # per_stock_stop_loss intentionally NOT wired in as a live default -- tested against
         # today's actual trades (2026-08-28) and it would have cut STARCEMENT right before
