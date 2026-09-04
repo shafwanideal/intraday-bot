@@ -24,11 +24,11 @@ from .strategy import (
     MAX_STOCKS_PER_DAY,
     PORTFOLIO_PROFIT_LOCK_GIVEBACK,
     PORTFOLIO_PROFIT_LOCK_TRIGGER,
-    PREMARKET_TRANCHE_PCT,
     PROFIT_EXIT,
     SQUARE_OFF_TIME,
     TRAIL_STOP,
     GridEngine,
+    exposure_per_stock,
 )
 
 # NSE trades on IST wall-clock time regardless of what timezone the machine
@@ -124,13 +124,10 @@ def run_shadow(poll_interval: int = POLL_INTERVAL_SECONDS) -> None:
     max_concurrent_positions = LIVE_CONCURRENT_SLOTS
     total_units = max_concurrent_positions  # no spare unit -- averaging is permanently off
 
-    premarket_symbols = set(plan.keys()) if _now().time() < MARKET_OPEN else set()
-    tranche_a_capital = margin_capital * PREMARKET_TRANCHE_PCT
-    tranche_b_capital = margin_capital * (1 - PREMARKET_TRANCHE_PCT)
-    tranche_a_count = max(len(premarket_symbols), 1)
-    tranche_b_count = max(max_concurrent_positions - len(premarket_symbols), 1)
-    tranche_a_exposure = (tranche_a_capital / tranche_a_count) * LEVERAGE
-    tranche_b_exposure = (tranche_b_capital / tranche_b_count) * LEVERAGE
+    # Equal split, full stop -- see exposure_per_stock()'s docstring in strategy.py for why
+    # the earlier two-tranche split (half held back for hypothetical later additions) was
+    # retired. Recomputed fresh at each entry below using the plan at that moment.
+    entry_exposure = exposure_per_stock(margin_capital, plan)
 
     engine = GridEngine(
         margin_capital=margin_capital,
@@ -150,11 +147,7 @@ def run_shadow(poll_interval: int = POLL_INTERVAL_SECONDS) -> None:
     print(f"SHADOW MODE (paper trading, no real orders) -- {today}")
     print(f"Plan: {plan}")
     print(f"Margin capital (live, from Kite): Rs {margin_capital:,.2f}")
-    if premarket_symbols:
-        print(f"Tranche A (premarket, {sorted(premarket_symbols)}): Rs {tranche_a_exposure:,.2f} each")
-        print(f"Tranche B (added after open): Rs {tranche_b_exposure:,.2f} each")
-    else:
-        print(f"No premarket tranche -- Rs {tranche_b_exposure:,.2f} each")
+    print(f"Equal split across {len(plan)} stock(s): Rs {entry_exposure:,.2f} each")
     print(f"Daily loss cap: Rs {engine.daily_loss_cap:,.2f}")
     print(f"ATR (14d): {symbol_atr}")
     print(f"Log: {logger.log_path}\n")
@@ -223,7 +216,7 @@ def run_shadow(poll_interval: int = POLL_INTERVAL_SECONDS) -> None:
                     direction = plan[symbol]
                     is_original = symbol in original_symbols
                     entry_price = quote["ohlc"]["open"] if is_original else quote["last_price"]
-                    exposure = tranche_a_exposure if symbol in premarket_symbols else tranche_b_exposure
+                    exposure = exposure_per_stock(margin_capital, plan)
                     quantity = exposure / entry_price
                     if engine.enter(symbol, entry_price, direction, _now(), atr=symbol_atr.get(symbol), quantity=quantity):
                         entered_today.add(symbol)
