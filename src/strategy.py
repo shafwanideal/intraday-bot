@@ -84,9 +84,12 @@ def compute_daily_loss_cap(margin_capital: float) -> float:
         return DAILY_LOSS_CAP
     excess = margin_capital - DAILY_LOSS_CAP_BASE_CAPITAL
     return DAILY_LOSS_CAP + (excess / DAILY_LOSS_CAP_STEP_CAPITAL) * DAILY_LOSS_CAP_STEP
-PORTFOLIO_PROFIT_LOCK_TRIGGER = 3000  # raised 700 -> 1000 -> 3000 through 2026-08-28; the
-# 3000 figure is now the standing default, not a one-day-only setting. Once
-# total (realized + unrealized) day P&L first crosses this, arm and start trailing the peak.
+PORTFOLIO_PROFIT_LOCK_TRIGGER = 3500  # raised 700 -> 1000 -> 3000 -> 3500 (2026-09-04),
+# mirroring DAILY_LOSS_CAP's Rs 3,500 tier at Rs 1.5L capital -- symmetric floor once
+# armed. Once total (realized + unrealized) day P&L first crosses this, arm and start
+# trailing the peak. If exact execution at 3,500 proves slippage-prone in practice, drop
+# back to 3,000 via PORTFOLIO_PROFIT_LOCK_TRIGGER_OVERRIDE (see src/live.py) rather than
+# editing this default -- no code change needed for that fallback.
 PORTFOLIO_PROFIT_LOCK_GIVEBACK = 500  # raised from 300 alongside the trigger. If total P&L
 # then pulls back this much from its peak after arming, everything closes immediately.
 # Genuine trailing stop on the whole day's P&L, not a fixed floor -- the lock level itself

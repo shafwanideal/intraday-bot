@@ -54,13 +54,26 @@ stock's own volatility instead of using one fixed percentage for
 everything — a stock with 4% daily range gets a wider trail than one with
 1.5%.
 
-## Risk controls (both are hard stops, not suggestions)
+## Risk controls (hard stops, not suggestions)
 
-- **Daily loss cap ₹10,000**, evaluated mark-to-market (realised P&L +
-  unrealised P&L on open positions) on every price poll. Breach → close
-  everything immediately and take no further trades that day.
-- **Hard square-off at 3:15 PM IST.** Anything still open — waiting,
+- **Daily loss cap**, evaluated mark-to-market (realised P&L + unrealised
+  P&L on open positions) on every price poll. Breach → close everything
+  immediately and take no further trades that day. Scales with capital:
+  ₹3,000 floor for margin capital ≤ ₹1,00,000, +₹500 per extra ₹50,000
+  (e.g. ₹3,500 at ₹1,50,000, ₹4,000 at ₹2,00,000).
+- **Portfolio profit lock**, same mark-to-market total. Once the day's
+  total P&L first reaches ₹3,500, it arms and starts tracking the peak —
+  the position keeps riding and the floor trails ₹500 behind that peak
+  (so it only ever ratchets up, never down). If total P&L pulls back to
+  the floor, close everything immediately and take no further trades that
+  day. If exact execution at ₹3,500 proves slippage-prone in practice,
+  ₹3,000 is an acceptable fallback trigger — dial it down via
+  `PORTFOLIO_PROFIT_LOCK_TRIGGER_OVERRIDE` rather than treating it as a
+  hard requirement.
+- **Hard square-off at 3:08 PM IST.** Anything still open — waiting,
   averaged, or mid-trail — is closed at market. Nothing is held overnight.
+  (Moved earlier from 3:15 PM after Kite itself started rejecting MIS
+  orders placed at or after 3:12 PM.)
 
 ---
 
