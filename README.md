@@ -47,6 +47,27 @@ logic (2% averaging/exit by default, 5x leverage, real Zerodha intraday
 costs, mark-to-market daily loss cap). Edit `DAILY_PLAN` in
 `scripts/run_daily_plan_backtest.py` to test your own dated picks.
 
+### Swing backtests (entry triggers)
+
+Separate from the intraday grid: multi-day positions, unlimited averaging
+legs, no square-off, delivery (CNC) costs. See `src/swing_strategy.py`.
+
+```bash
+python3 scripts/compare_entry_triggers.py                        # all triggers, side by side
+python3 scripts/compare_entry_triggers.py 200000 252 nifty200 1500000
+python3 scripts/run_52w_low_backtest.py 200000 252 nifty50 1500000 rsi_dip
+```
+
+Args are positional: capital per leg, entry-window length in trading days,
+universe (`nifty50` | `nifty200` | `nifty500`), max total capital (`none`
+for uncapped), and for the single-trigger script a trigger (`52w_low` |
+`rsi_dip`) and source (`yahoo` | `kite`).
+
+These need only **daily** bars, which Yahoo serves free and without auth via
+`src/yahoo_daily.py` — so unlike the intraday backtests they run with no Kite
+login at all. Bars are cached under `.cache/` per fetch-date, so re-running
+with different strategy parameters doesn't re-download the universe.
+
 ## Shadow mode (paper trading against live data)
 
 Each morning, once you have today's picks (max 3, since that's the
