@@ -11,9 +11,13 @@ Both arms share one fetch of the daily bars and one simulation loop
 (`src.swing_backtest.run`), so any difference in the results is the trigger and
 nothing else.
 
-Usage: python3 scripts/compare_entry_triggers.py [capital_per_leg] [lookback_trading_days] [universe] [max_total_capital]
+Usage: python3 scripts/compare_entry_triggers.py [capital_per_leg] [lookback_trading_days] [universe] [max_total_capital] [stop_fill]
   universe: nifty50 (default) | nifty200 | nifty500
   max_total_capital: hard cap on total capital committed at once; "none" for uncapped.
+  stop_fill: level (default) | close -- how a breached trailing stop fills. "level"
+    treats it as the resting order it would really be (fill at the stop, or at the
+    open on a gap-down); "close" is the older, wrong model that books the whole day's
+    decline. See SwingEngine.stop_fill_at_level.
 """
 
 import sys
@@ -53,6 +57,7 @@ def main() -> None:
     max_total_capital: float | None = DEFAULT_MAX_TOTAL_CAPITAL
     if len(sys.argv) > 4:
         max_total_capital = None if sys.argv[4].lower() in ("none", "-") else float(sys.argv[4])
+    stop_fill_at_level = (sys.argv[5].lower() if len(sys.argv) > 5 else "level") == "level"
 
     symbols = UNIVERSE_LOADERS[universe]()
     print(f"Universe: {len(symbols)} {universe} symbols")
@@ -75,6 +80,7 @@ def main() -> None:
             capital_per_leg=capital_per_leg,
             atr_multiplier=ATR_MULTIPLIER,
             max_total_capital=max_total_capital,
+            stop_fill_at_level=stop_fill_at_level,
         )
         results[name] = (result, swing_backtest.summarize(result, daily_data))
 
@@ -83,7 +89,8 @@ def main() -> None:
     print(f"ENTRY TRIGGER COMPARISON -- {universe}, {len(entry_window)} trading-day entry window")
     print(
         f"Capital/leg: Rs {capital_per_leg:,.0f}  Averaging: {swing_strategy.AVERAGING_DROP_PCT:.0%} drop  "
-        f"Trail arms: +{swing_strategy.PROFIT_TARGET_PCT:.0%}  ATR mult: {ATR_MULTIPLIER}x  Total cap: {cap_str}"
+        f"Trail arms: +{swing_strategy.PROFIT_TARGET_PCT:.0%}  ATR mult: {ATR_MULTIPLIER}x  Total cap: {cap_str}\n"
+        f"Stop fills at: {'the stop level (resting order)' if stop_fill_at_level else 'the daily CLOSE (old, overstates losses)'}"
     )
     print(f"{'=' * 78}\n")
 

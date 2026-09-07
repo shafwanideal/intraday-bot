@@ -99,6 +99,7 @@ class SwingEngine:
         atr_multiplier: float | None = None,
         apply_costs: bool = True,
         max_total_capital: float | None = None,
+        stop_fill_at_level: bool = False,
     ):
         self.capital_per_leg = capital_per_leg
         self.averaging_drop_pct = averaging_drop_pct
@@ -116,6 +117,17 @@ class SwingEngine:
         # uncapped (old behavior). Both a brand-new entry AND an averaging leg on an
         # existing position are refused if they'd push total committed capital past this.
         self.max_total_capital = max_total_capital
+        # A trailing stop is a RESTING ORDER: it fills when price trades through the
+        # stop level, not at whatever that day happened to close at. With this False
+        # (the historical behavior) an exit is booked at the close, so a day that
+        # breaches the stop early and keeps falling books the full day's decline as if
+        # the stop never existed -- on GODFRYPHLP 2026-02-23 that turned a ~2485 stop
+        # into a 2213 fill, roughly Rs 1,11,000 of phantom loss on one trade, enough to
+        # flip the sign of a whole backtest. With it True the fill is the stop level,
+        # or the day's open when the stock opened below the stop (gap-down: the resting
+        # order fills at the open, and no stop protects against a gap).
+        # Still optimistic: it ignores slippage past the level in a fast market.
+        self.stop_fill_at_level = stop_fill_at_level
         self.open_positions: dict[str, SwingPosition] = {}
         self.closed_trades: list[dict] = []
 
@@ -167,9 +179,11 @@ class SwingEngine:
         self.closed_trades.append(entry)
         return entry
 
-    def update(self, symbol: str, price: float, date) -> dict | None:
+    def update(self, symbol: str, price: float, date, low: float | None = None, open_: float | None = None) -> dict | None:
         """Call once per trading day (using that day's close) for each open
-        position.
+        position. `low` and `open_` are that day's low and open; they are only
+        used when `stop_fill_at_level` is set, to fill a breached trailing stop
+        at the stop level rather than at the close.
 
         Once armed (price first reaches profit_target_pct above the CURRENT
         blended average -- recomputed after every leg), the position no
@@ -190,6 +204,11 @@ class SwingEngine:
             stop_level = (
                 pos.peak_price - self.atr_multiplier * pos.atr if use_atr else pos.peak_price * (1 - self.trailing_pct)
             )
+            if self.stop_fill_at_level and low is not None and low <= stop_level:
+                # Gap-down below the stop: a resting order fills at the open, not at a
+                # level the stock never traded at after the bell.
+                fill = min(open_, stop_level) if open_ is not None else stop_level
+                return self._close(symbol, fill, date, "trailing_stop_exit")
             if price <= stop_level:
                 return self._close(symbol, price, date, "trailing_stop_exit")
             return None

@@ -32,6 +32,7 @@ def run(
     capital_per_leg: float,
     atr_multiplier: float,
     max_total_capital: float | None = None,
+    stop_fill_at_level: bool = True,
 ) -> dict:
     """Simulate one entry trigger over `daily_data`.
 
@@ -40,13 +41,20 @@ def run(
     in the data, so a trade opened on the last day of the window is still
     followed to its exit rather than being cut off there.
 
-    Entries and averaging legs both fill at that day's CLOSE. Returns the
-    engine plus the counters the reports need.
+    Entries and averaging legs both fill at that day's CLOSE. A breached
+    trailing stop, by contrast, fills at the STOP LEVEL by default
+    (`stop_fill_at_level`), because it is a resting order -- booking it at the
+    close instead charges the position the whole rest of the day's decline.
+    That distinction is not cosmetic: it was worth ~Rs 1,11,000 on a single
+    trade in the nifty200 run, enough to flip that arm's sign.
+
+    Returns the engine plus the counters the reports need.
     """
     engine = swing_strategy.SwingEngine(
         capital_per_leg=capital_per_leg,
         atr_multiplier=atr_multiplier,
         max_total_capital=max_total_capital,
+        stop_fill_at_level=stop_fill_at_level,
     )
     entry_window_set = set(entry_window)
     all_dates = trading_dates(daily_data)
@@ -95,7 +103,8 @@ def run(
             day_rows = daily_data[sym][daily_data[sym].index.date == d]
             if day_rows.empty:
                 continue
-            engine.update(sym, float(day_rows.iloc[0]["Close"]), d)
+            bar = day_rows.iloc[0]
+            engine.update(sym, float(bar["Close"]), d, low=float(bar["Low"]), open_=float(bar["Open"]))
 
         capital_by_date.append(
             (
