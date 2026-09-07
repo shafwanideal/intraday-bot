@@ -37,8 +37,9 @@ authenticated client — it reuses the cached token if still valid for today.
 ## Backtest
 
 ```bash
-python3 scripts/run_backtest.py             # generic sample-symbol backtest
+python3 scripts/run_backtest.py              # generic sample-symbol backtest
 python3 scripts/run_daily_plan_backtest.py   # backtest specific (date, symbol) picks you actually made
+python3 scripts/run_bse_today_backtest.py    # one stock, one day (BSE long), no Kite login needed
 ```
 
 Uses free Yahoo Finance 5-min intraday data (last ~60 days only) via
@@ -46,6 +47,13 @@ Uses free Yahoo Finance 5-min intraday data (last ~60 days only) via
 logic (2% averaging/exit by default, 5x leverage, real Zerodha intraday
 costs, mark-to-market daily loss cap). Edit `DAILY_PLAN` in
 `scripts/run_daily_plan_backtest.py` to test your own dated picks.
+
+The Kite-based scripts need a same-day login. `src/yahoo_intraday.py` is a
+login-free fallback feed (Yahoo's chart endpoint over plain `requests`, same
+DataFrame shape as `src/kite_data.py`, including a 14-day ATR helper) for
+quick after-the-fact checks like `scripts/run_bse_today_backtest.py`. It is a
+different vendor's prices than the bot trades on, so pass `--source kite` when
+the numbers need to match live/shadow mode.
 
 ### Swing backtests (entry triggers)
 

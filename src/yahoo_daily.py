@@ -115,6 +115,22 @@ def fetch_daily(symbol: str, days: int = 850, use_cache: bool = True) -> pd.Data
         "events": "split",
     }
 
+    result = chart_result(symbol, params)
+    if result is None:
+        return pd.DataFrame()
+    df = _to_frame(result)
+    if use_cache and not df.empty:
+        _write_cache(symbol, days, df)
+    return df
+
+
+def chart_result(symbol: str, params: dict) -> dict | None:
+    """One chart-API call for `symbol`, retried with backoff. Returns Yahoo's
+    raw result object, or None (with a warning) if the symbol is unknown or
+    every attempt failed -- callers skip the symbol rather than die on it.
+
+    Shared with `src.yahoo_intraday`, which hits the same endpoint with a
+    minute-level interval; only the params and the frame-building differ."""
     last_error: str | None = None
     for attempt in range(MAX_RETRIES):
         try:
@@ -136,14 +152,11 @@ def fetch_daily(symbol: str, days: int = 850, use_cache: bool = True) -> pd.Data
         if not result:
             error = (payload.get("chart") or {}).get("error")
             print(f"WARNING: no data for {symbol} from Yahoo ({error}), skipping")
-            return pd.DataFrame()
-        df = _to_frame(result[0])
-        if use_cache and not df.empty:
-            _write_cache(symbol, days, df)
-        return df
+            return None
+        return result[0]
 
     print(f"WARNING: Yahoo fetch failed for {symbol} after {MAX_RETRIES} attempts ({last_error}), skipping")
-    return pd.DataFrame()
+    return None
 
 
 def _to_frame(result: dict) -> pd.DataFrame:
