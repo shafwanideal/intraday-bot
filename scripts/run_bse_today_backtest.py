@@ -60,12 +60,11 @@ CAVEATS = """
 CAVEATS (read before acting on these numbers):
 - ONE trading day and ONE stock. This says what happened today, and nothing
   at all about whether the pick or the strategy is any good.
-- Default data source here is Yahoo (src/yahoo_intraday.py), NOT the Kite feed
-  the bot actually trades on -- it needs no same-day login, which is the only
-  reason it's the default for a quick after-the-fact check. Prices come from
-  a different vendor and the last bar or two of the session can be missing,
-  so small differences vs Kite are expected. Re-run with --source kite (after
-  python3 -m src.auth) for the same feed as live/shadow mode.
+- Data is Kite's, the same feed live/shadow mode trades on, as long as this
+  runs with a same-day token (python3 -m src.auth, or a KITE_ACCESS_TOKEN env
+  var in an environment that can't run that login). --source yahoo is a
+  fallback for when neither is available: a different vendor's prices, whose
+  last bar or two of a session can be missing, so expect small differences.
 - Entry is at today's real 9:15 open, one unit, no entry filter -- the
   backtest assumes the decision to be long BSE today was already made.
 - Trigger levels are evaluated on each 5-min bar's CLOSE, not tick by tick,
@@ -85,10 +84,11 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument(
         "--source",
-        choices=("yahoo", "kite"),
-        default="yahoo",
-        help="Bar source. 'kite' is the same feed the bot trades on but needs a same-day login; "
-        "'yahoo' (default) needs no login.",
+        choices=("kite", "yahoo"),
+        default="kite",
+        help="Bar source. 'kite' (default) is the same feed the bot trades on, and needs either a "
+        "same-day login (python3 -m src.auth) or a KITE_ACCESS_TOKEN env var. 'yahoo' needs "
+        "neither, but is a different vendor's prices.",
     )
     parser.add_argument(
         "--date",
@@ -103,10 +103,18 @@ def load_bars(source: str, day: date) -> tuple[dict, dict]:
     if source == "kite":
         from src import kite_data
 
-        # A window, not a single day: Kite's intraday endpoint is fetched in
-        # chunks and `day` still has to fall inside it.
-        bars = kite_data.fetch_many([SYMBOL], days=10, interval="5minute")
-        return bars, kite_data.fetch_symbol_atr([SYMBOL])
+        try:
+            # A window, not a single day: Kite's intraday endpoint is fetched in
+            # chunks and `day` still has to fall inside it.
+            bars = kite_data.fetch_many([SYMBOL], days=10, interval="5minute")
+            return bars, kite_data.fetch_symbol_atr([SYMBOL])
+        except RuntimeError as exc:
+            # Missing credentials or a dead token. Both are a setup problem with a
+            # known fix, so say the fix instead of dumping a traceback -- and point
+            # at the fallback rather than leaving the run with nothing.
+            print(f"\nCan't reach Kite: {exc}")
+            print("\nFix that, or re-run with --source yahoo for a login-free (different-vendor) feed.")
+            sys.exit(1)
 
     from src import yahoo_intraday
 

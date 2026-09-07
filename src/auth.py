@@ -121,11 +121,51 @@ def login() -> str:
     access_token = session["access_token"]
     _save_session(access_token)
     print(f"Access token saved to {config.SESSION_FILE} for today.")
+    # Printed so it can be carried to an environment that can't run this flow
+    # (see config.KITE_ACCESS_TOKEN). It's a live credential for the rest of
+    # today -- it can place orders, not just read data -- so don't paste it
+    # anywhere it will be logged or persisted beyond tonight.
+    print(f"  KITE_ACCESS_TOKEN={access_token}")
     return access_token
 
 
+def _client_from_env_token(access_token: str) -> KiteConnect:
+    """Use a token minted elsewhere (KITE_ACCESS_TOKEN) instead of logging in.
+
+    Deliberately NOT written to SESSION_FILE: the env var is a per-session
+    choice, and caching it would silently outlive the environment it was set
+    in. The profile() call is a cheap up-front check -- an expired token is
+    the normal case here (Kite kills them overnight), and failing now with a
+    clear message beats failing halfway through a backtest with Kite's
+    generic "Incorrect `api_key` or `access_token`".
+    """
+    config.require_api_key()  # the secret is only needed to MINT a token, not to use one
+    kite = KiteConnect(api_key=config.KITE_API_KEY)
+    kite.set_access_token(access_token)
+    try:
+        profile = kite.profile()
+    except KiteException as exc:
+        raise RuntimeError(
+            f"KITE_ACCESS_TOKEN was rejected by Kite ({exc}). Tokens expire overnight -- "
+            "run `python3 -m src.auth` where you can log in, and set KITE_ACCESS_TOKEN to "
+            "the fresh token (it's printed there and stored in .kite_session.json)."
+        ) from exc
+    print(f"Using KITE_ACCESS_TOKEN from the environment (authenticated as {profile['user_name']}).")
+    return kite
+
+
 def get_kite() -> KiteConnect:
-    """Return an authenticated KiteConnect client, reusing today's cached token if present."""
+    """Return an authenticated KiteConnect client.
+
+    Token precedence: an explicit KITE_ACCESS_TOKEN env var, then today's
+    cached session file, then an interactive login. The env var wins because
+    setting it is a deliberate per-session act -- and in the environments that
+    need it (headless/cloud), the login it would otherwise fall through to
+    can't run at all.
+    """
+    if config.KITE_ACCESS_TOKEN:
+        return _client_from_env_token(config.KITE_ACCESS_TOKEN)
+
     config.require_credentials()
     kite = KiteConnect(api_key=config.KITE_API_KEY)
 

@@ -34,6 +34,22 @@ access token and caches it in `.kite_session.json` (gitignored) for the rest
 of the day. Other modules should call `src.auth.get_kite()` to get an
 authenticated client — it reuses the cached token if still valid for today.
 
+That login needs a browser and someone at the keyboard, so it can't run in a
+headless or cloud session. For those, generate the token where you *can* log
+in (`python3 -m src.auth` prints `KITE_ACCESS_TOKEN=...` alongside caching it)
+and set it as an environment variable there:
+
+```bash
+export KITE_ACCESS_TOKEN=...   # today's token, from the login above
+export KITE_API_KEY=...        # KITE_API_SECRET is NOT needed for this path
+```
+
+`get_kite()` prefers that variable over both the cache and the login flow, and
+validates it up front so an expired one fails immediately with a clear message
+rather than mid-backtest. Kite kills tokens overnight, so it's a fresh value
+each trading day — and it's a live credential that can place orders, not just
+read data, so treat it like one.
+
 ## Backtest
 
 ```bash
@@ -48,12 +64,13 @@ logic (2% averaging/exit by default, 5x leverage, real Zerodha intraday
 costs, mark-to-market daily loss cap). Edit `DAILY_PLAN` in
 `scripts/run_daily_plan_backtest.py` to test your own dated picks.
 
-The Kite-based scripts need a same-day login. `src/yahoo_intraday.py` is a
-login-free fallback feed (Yahoo's chart endpoint over plain `requests`, same
-DataFrame shape as `src/kite_data.py`, including a 14-day ATR helper) for
-quick after-the-fact checks like `scripts/run_bse_today_backtest.py`. It is a
-different vendor's prices than the bot trades on, so pass `--source kite` when
-the numbers need to match live/shadow mode.
+These read Kite's feed — the same one live/shadow mode trades on — so they
+need a same-day token (see Authenticate above). `scripts/run_bse_today_backtest.py`
+also takes `--source yahoo`, which falls back to `src/yahoo_intraday.py`
+(Yahoo's chart endpoint over plain `requests`, same DataFrame shape as
+`src/kite_data.py`, including a 14-day ATR helper) when no token is available
+at all. That's a different vendor's prices, so numbers won't match live mode
+exactly — the script says which source it used.
 
 ### Swing backtests (entry triggers)
 
