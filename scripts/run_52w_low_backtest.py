@@ -10,14 +10,17 @@ all CLI args (see the DEFAULT_* constants) rather than fixed, since these
 get re-run with different real capital plans, universes, and (2026-09-02)
 entry triggers for direct comparison.
 
-Usage: python3 scripts/run_52w_low_backtest.py [capital_per_leg] [lookback_trading_days] [universe] [max_total_capital] [trigger]
+Usage: python3 scripts/run_52w_low_backtest.py [capital_per_leg] [lookback_trading_days] [universe] [max_total_capital] [trigger] [source]
   universe: nifty50 (default) | nifty200 | nifty500
   max_total_capital: hard cap on TOTAL capital committed across everything at once
     (entries AND averaging legs are refused once this would be exceeded). Omit for
-    uncapped (old behavior).
+    uncapped (old behavior). Pass "none" to skip it while still setting later args.
   trigger: 52w_low (default) | rsi_dip -- rsi_dip enters on RSI(14)<=30 while price
     is still above its 200-day EMA (a real uptrend), instead of any fresh 52-week low
     regardless of the stock's underlying trend.
+  source: yahoo (default) | kite -- where the daily bars come from. Only daily bars
+    are needed here, and Yahoo serves those free and unauthenticated, so this runs
+    anywhere; kite needs a same-day interactive login (python3 -m src.auth).
 """
 
 import sys
@@ -26,12 +29,13 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from src import indicators, kite_data, screener, swing_strategy
+from src import indicators, kite_data, screener, swing_strategy, yahoo_daily
 
 DEFAULT_CAPITAL_PER_LEG = 200_000
 DEFAULT_LOOKBACK_TRADING_DAYS = 60  # window over which NEW entries are allowed
 DEFAULT_UNIVERSE = "nifty50"
 DEFAULT_TRIGGER = "52w_low"
+DEFAULT_SOURCE = "yahoo"
 DAILY_HISTORY_DAYS = 850  # covers up to a 1-year (~252 trading day) entry window + the 252-day lookback + buffer
 ATR_MULTIPLIER = 0.5
 ATR_PERIOD = 14
@@ -47,6 +51,12 @@ TRIGGER_SCREENERS = {
     "rsi_dip": screener.screen_rsi_dip_entries,
 }
 
+# (fetch_daily(symbol, days=...) -> DataFrame, inter-request delay seconds)
+DATA_SOURCES = {
+    "yahoo": (yahoo_daily.fetch_daily, yahoo_daily.REQUEST_DELAY_SECONDS),
+    "kite": (kite_data.fetch_daily, kite_data.REQUEST_DELAY_SECONDS),
+}
+
 TRIGGER_LABELS = {
     "52w_low": "fresh 52-week low",
     "rsi_dip": "RSI(14)<=30 oversold while above 200-day EMA",
@@ -57,20 +67,26 @@ def main() -> None:
     capital_per_leg = float(sys.argv[1]) if len(sys.argv) > 1 else DEFAULT_CAPITAL_PER_LEG
     lookback_trading_days = int(sys.argv[2]) if len(sys.argv) > 2 else DEFAULT_LOOKBACK_TRADING_DAYS
     universe = sys.argv[3] if len(sys.argv) > 3 else DEFAULT_UNIVERSE
-    max_total_capital = float(sys.argv[4]) if len(sys.argv) > 4 else None
+    max_total_capital = None
+    if len(sys.argv) > 4 and sys.argv[4].lower() not in ("none", "-"):
+        max_total_capital = float(sys.argv[4])
     trigger = sys.argv[5] if len(sys.argv) > 5 else DEFAULT_TRIGGER
+    source = sys.argv[6] if len(sys.argv) > 6 else DEFAULT_SOURCE
     screen_entries = TRIGGER_SCREENERS[trigger]
+    fetch_daily, request_delay = DATA_SOURCES[source]
 
     symbols = UNIVERSE_LOADERS[universe]()
     print(f"Universe: {len(symbols)} {universe} symbols")
 
-    print(f"Fetching {DAILY_HISTORY_DAYS}d of daily bars for all {len(symbols)} symbols ...")
+    print(f"Fetching {DAILY_HISTORY_DAYS}d of daily bars for all {len(symbols)} symbols from {source} ...")
     daily_data: dict = {}
     for i, sym in enumerate(symbols):
-        df = kite_data.fetch_daily(sym, days=DAILY_HISTORY_DAYS)
+        df = fetch_daily(sym, days=DAILY_HISTORY_DAYS)
         if not df.empty:
             daily_data[sym] = df
-        time.sleep(kite_data.REQUEST_DELAY_SECONDS)
+        if (i + 1) % 25 == 0:
+            print(f"  ... {i + 1}/{len(symbols)} symbols fetched ({len(daily_data)} with data)")
+        time.sleep(request_delay)
     print(f"Got data for {len(daily_data)}/{len(symbols)} symbols")
 
     all_dates = sorted({d for df in daily_data.values() for d in df.index.date})
@@ -128,7 +144,7 @@ def main() -> None:
     still_open = engine.open_positions
 
     print(f"\n{'=' * 70}")
-    print(f"{trigger} entry backtest ({universe}, unlimited-leg averaging, ATR trailing)")
+    print(f"{trigger} entry backtest ({universe} via {source}, unlimited-leg averaging, ATR trailing)")
     cap_str = f"Rs {max_total_capital:,.0f}" if max_total_capital is not None else "UNCAPPED"
     print(
         f"Capital per leg: Rs {capital_per_leg:,.0f}  Averaging drop: {swing_strategy.AVERAGING_DROP_PCT:.0%}  "
