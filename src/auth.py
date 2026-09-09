@@ -93,33 +93,68 @@ def _login_via_local_callback(login_url: str) -> str | None:
     return _CallbackHandler.request_token
 
 
-def login() -> str:
+def build_login_url() -> str:
+    """The Kite OAuth URL the user must open in a browser. Split out of
+    login() so the control bot can send it to a phone instead of printing it
+    to a terminal nobody is watching."""
+    config.require_credentials()
+    return KiteConnect(api_key=config.KITE_API_KEY).login_url()
+
+
+def complete_login(raw: str) -> str:
+    """Exchange a pasted redirect URL (or a bare request_token) for today's
+    access token and cache it. Returns the access token.
+
+    This is the half of login() that has no terminal in it, so it works
+    identically whether the request_token arrived via the local callback
+    server, a terminal paste, or a Telegram message."""
+    config.require_credentials()
+    kite = KiteConnect(api_key=config.KITE_API_KEY)
+    request_token = _extract_request_token(raw)
+    try:
+        session = kite.generate_session(request_token, api_secret=config.KITE_API_SECRET)
+    except KiteException as exc:
+        raise RuntimeError(f"Kite login failed: {exc}") from exc
+    access_token = session["access_token"]
+    _save_session(access_token)
+    return access_token
+
+
+def has_valid_session() -> bool:
+    """True if get_kite() would succeed without an interactive login, so
+    callers can tell 'needs login' from 'ready' without triggering one.
+
+    Mirrors get_kite()'s precedence: an env token counts as a session even
+    though it never touches SESSION_FILE. Checking only the cache would make
+    the control bot demand /login on a box that was handed KITE_ACCESS_TOKEN
+    and is perfectly able to trade.
+    """
+    return bool(config.KITE_ACCESS_TOKEN) or _load_cached_session() is not None
+
+
+def login(paste_only: bool = False) -> str:
     """Run the interactive Kite Connect login flow and return a fresh access token.
 
     Kite access tokens are tied to the calendar day, so this must be re-run
     each trading day. Tries to catch the OAuth redirect automatically via a
     local server; falls back to manual copy-paste if that doesn't work.
-    """
-    config.require_credentials()
-    kite = KiteConnect(api_key=config.KITE_API_KEY)
-    login_url = kite.login_url()
 
-    request_token = _login_via_local_callback(login_url)
+    On a headless box (Contabo) the callback server is only reachable if
+    you SSH'd in with `-L 8000:localhost:8000`. Without that tunnel the wait
+    is a guaranteed CALLBACK_TIMEOUT_SECONDS of dead air before the paste
+    prompt appears, so paste_only=True skips straight to the prompt.
+    """
+    login_url = build_login_url()
+
+    request_token = None if paste_only else _login_via_local_callback(login_url)
 
     if not request_token:
         print("1. Open this URL in your browser and log in to Kite:")
         print(f"   {login_url}")
         print("2. After login, Kite redirects to your app's redirect URL with a request_token param.")
-        raw = input("3. Paste the full redirect URL (or just the request_token) here: ")
-        request_token = _extract_request_token(raw)
+        request_token = input("3. Paste the full redirect URL (or just the request_token) here: ")
 
-    try:
-        session = kite.generate_session(request_token, api_secret=config.KITE_API_SECRET)
-    except KiteException as exc:
-        raise RuntimeError(f"Kite login failed: {exc}") from exc
-
-    access_token = session["access_token"]
-    _save_session(access_token)
+    access_token = complete_login(request_token)
     print(f"Access token saved to {config.SESSION_FILE} for today.")
     # Printed so it can be carried to an environment that can't run this flow
     # (see config.KITE_ACCESS_TOKEN). It's a live credential for the rest of
@@ -154,7 +189,7 @@ def _client_from_env_token(access_token: str) -> KiteConnect:
     return kite
 
 
-def get_kite() -> KiteConnect:
+def get_kite(interactive: bool = True) -> KiteConnect:
     """Return an authenticated KiteConnect client.
 
     Token precedence: an explicit KITE_ACCESS_TOKEN env var, then today's
@@ -162,6 +197,11 @@ def get_kite() -> KiteConnect:
     setting it is a deliberate per-session act -- and in the environments that
     need it (headless/cloud), the login it would otherwise fall through to
     can't run at all.
+
+    interactive=False raises instead of prompting at that last step, for
+    callers with no terminal to prompt on (the Telegram control bot, or
+    anything under systemd), where blocking on input() would hang the process
+    forever rather than fail visibly.
     """
     if config.KITE_ACCESS_TOKEN:
         return _client_from_env_token(config.KITE_ACCESS_TOKEN)
@@ -171,6 +211,11 @@ def get_kite() -> KiteConnect:
 
     access_token = _load_cached_session()
     if not access_token:
+        if not interactive:
+            raise RuntimeError(
+                "No valid Kite session for today and no terminal to log in from. "
+                "Send /login to the Telegram bot, or run `python3 -m src.auth` on the server."
+            )
         access_token = login()
 
     kite.set_access_token(access_token)
@@ -178,6 +223,10 @@ def get_kite() -> KiteConnect:
 
 
 if __name__ == "__main__":
+    import sys
+
+    if "--paste" in sys.argv and not has_valid_session():
+        login(paste_only=True)
     client = get_kite()
     profile = client.profile()
     print(f"Authenticated as {profile['user_name']} ({profile['user_id']})")

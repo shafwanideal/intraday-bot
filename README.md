@@ -3,8 +3,12 @@
 Grid-averaging intraday strategy for Indian equities via Zerodha Kite Connect.
 See the project brief for strategy rules and build status.
 
-**Status**: auth, a real historical backtest, and shadow (paper) trading
-against live Kite data are working. Nothing here places real orders yet.
+**Status**: auth, a real historical backtest, shadow (paper) trading, and
+live order placement are working. Live trading is gated behind
+`LIVE_TRADING_ENABLED=true` plus a typed confirmation.
+
+Can be run entirely from a phone via the Telegram control bot -- see
+"Phone control" below and `deploy/README.md` for the Contabo VPS setup.
 
 ## Setup
 
@@ -25,7 +29,8 @@ toolchain installed.
 Kite access tokens expire daily, so this must be run once each trading morning:
 
 ```bash
-python3 -m src.auth
+python3 -m src.auth            # add --paste on a headless box to skip
+                               # the callback wait and paste the URL directly
 ```
 
 This prints a login URL, waits for you to paste back the redirect URL (or
@@ -49,6 +54,32 @@ validates it up front so an expired one fails immediately with a clear message
 rather than mid-backtest. Kite kills tokens overnight, so it's a fresh value
 each trading day — and it's a live credential that can place orders, not just
 read data, so treat it like one.
+
+## Phone control (Telegram)
+
+Runs the whole trading day from Telegram, so a VPS can host it with no SSH
+session open:
+
+```bash
+python3 scripts/run_bot.py     # or under systemd -- see deploy/README.md
+```
+
+```
+/login          authenticate with Kite (once per trading day)
+RVNL long, MAZDOCK short       set today's plan
+/confirm  ->  CONFIRM          approve sizing and arm real trading
+/status         open positions and live P&L
+/add BSE long   add a stock to a running session
+/stop           square off everything now
+/shadow         paper-trade today's plan instead
+```
+
+This changes *where* the confirmation is typed, not whether one is required.
+`LIVE_TRADING_ENABLED=true` must still be set in `.env` on the server, and a
+human still approves the same sizing summary the terminal would have printed.
+The bot ignores messages from any chat other than `TELEGRAM_CHAT_ID`.
+
+Needs `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` in `.env`.
 
 ## Backtest
 

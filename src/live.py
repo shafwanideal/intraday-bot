@@ -68,22 +68,104 @@ LOG_DIR = PROJECT_ROOT / "logs"
 class LiveLogger:
     """Same shape as ShadowLogger, plus a dedicated CRITICAL channel for
     anything that needs the user's immediate manual attention (a real
-    position whose exit/averaging order didn't confirm)."""
+    position whose exit/averaging order didn't confirm).
 
-    def __init__(self, log_path: Path):
+    An optional `notifier` (any callable taking one string) mirrors the
+    events worth interrupting someone for. Deliberately a plain callable
+    rather than importing telegram_notify here: the log is the system of
+    record and must not grow a hard dependency on a chat service.
+    """
+
+    # Everything else -- heartbeat every 15s, poll_prices, plan reloads -- stays
+    # in the jsonl only. A notification per poll would train the user to ignore
+    # the channel, which is exactly the channel a CRITICAL needs to arrive on.
+    NOTIFY_KINDS = {
+        "start",
+        "entry",
+        "exit",
+        "averaging",
+        "daily_loss_cap_exit",
+        "per_stock_stop_loss_exit",
+        "portfolio_profit_lock_exit",
+        "square_off",
+        "order_rejected",
+        "entry_failed",
+        "stop_requested",
+        "end",
+    }
+
+    def __init__(self, log_path: Path, notifier=None):
         self.log_path = log_path
+        self.notifier = notifier
         log_path.parent.mkdir(exist_ok=True)
+
+    def _notify(self, text: str) -> None:
+        if self.notifier is None:
+            return
+        try:
+            self.notifier(text)
+        except Exception as exc:  # noqa: BLE001 - a chat outage must never stop trading
+            print(f"WARNING: notifier failed: {exc}")
 
     def event(self, kind: str, **fields) -> None:
         record = {"timestamp": _now().isoformat(), "kind": kind, **fields}
         print(f"[{record['timestamp']}] {kind}: {fields}")
         with open(self.log_path, "a") as f:
             f.write(json.dumps(record, default=str) + "\n")
+        if kind in self.NOTIFY_KINDS:
+            self._notify(_format_event(kind, fields))
 
     def critical(self, message: str, **fields) -> None:
         banner = "!" * 70
         print(f"\n{banner}\nCRITICAL -- MANUAL ACTION NEEDED: {message}\n{banner}\n")
         self.event("CRITICAL", message=message, **fields)
+        # Routed outside NOTIFY_KINDS so a CRITICAL can never be filtered out
+        # by an edit to that set -- this is the one message that must arrive.
+        self._notify(f"\u26a0\ufe0f CRITICAL -- MANUAL ACTION NEEDED\n\n{message}")
+
+
+def _money(value) -> str:
+    """Rupee formatting that tolerates a missing/non-numeric value."""
+    try:
+        return f"Rs {float(value):,.2f}"
+    except (TypeError, ValueError):
+        return "Rs n/a"
+
+
+def _format_event(kind: str, fields: dict) -> str:
+    """One-line human phrasing of a log event for the notification channel.
+
+    Every numeric field is formatted defensively: a fill that came back
+    without an average_price would otherwise raise inside the logger, and a
+    crash in the notification path must never be able to take down the
+    polling loop that is holding real positions.
+    """
+    sym = fields.get("symbol", "")
+    price = _money(fields.get("price"))
+    qty = fields.get("qty") or fields.get("quantity")
+    if kind == "entry":
+        return f"\u2705 ENTRY {sym} {fields.get('direction', '')} qty={qty} @ {price}"
+    if kind == "exit":
+        return f"\U0001f6aa EXIT {sym} ({fields.get('reason', '')}) qty={qty} @ {price}"
+    if kind == "averaging":
+        return f"\u2795 AVERAGED {sym} qty={qty} @ {price}"
+    if kind == "square_off":
+        return f"\U0001f514 SQUARE-OFF {sym} qty={qty} @ {price}"
+    if kind == "daily_loss_cap_exit":
+        return f"\U0001f6d1 LOSS CAP HIT -- closing {sym} qty={qty} @ {price}"
+    if kind == "per_stock_stop_loss_exit":
+        return f"\U0001f6d1 STOP-LOSS {sym} qty={qty} @ {price}"
+    if kind == "portfolio_profit_lock_exit":
+        return f"\U0001f512 PROFIT LOCK -- closing {sym} qty={qty} @ {price}"
+    if kind in ("order_rejected", "entry_failed"):
+        return f"\u274c {kind.upper()} {sym}: {fields.get('error', fields.get('result', ''))}"
+    if kind == "stop_requested":
+        return "\U0001f6d1 Stop requested -- squaring off all open positions now."
+    if kind == "start":
+        return f"\u25b6\ufe0f Live session started. Plan: {fields.get('plan', {})}"
+    if kind == "end":
+        return f"\U0001f3c1 Session ended. Realized net P&L today: {_money(fields.get('daily_pnl', 0))} over {fields.get('trades', 0)} trade(s)."
+    return f"{kind}: {fields}"
 
 
 def _fetch_margin_capital(kite) -> float:
@@ -334,40 +416,55 @@ def _detect_manual_closes(kite, engine: GridEngine, real_qty: dict[str, int], lo
             real_qty.pop(symbol, None)
 
 
-def _confirm_or_abort(
+def build_plan_summary(
     plan: dict[str, str],
     engine: GridEngine,
     premarket_symbols: set[str],
     tranche_a_exposure: float,
     tranche_b_exposure: float,
-) -> bool:
-    print("=" * 70)
-    print("LIVE TRADING MODE -- THIS WILL PLACE REAL ORDERS WITH REAL MONEY")
-    print("=" * 70)
-    print(f"Today's plan: {plan}")
-    print(f"Margin capital (live, from Kite): Rs {engine.margin_capital:,.2f}")
+) -> str:
+    """Everything the human needs to see before approving real orders, as
+    plain text. Split out of the terminal prompt so the identical summary can
+    be shown on a phone -- the approval decision must be made against the same
+    numbers regardless of which surface it arrives on."""
+    lines = [
+        "=" * 70,
+        "LIVE TRADING MODE -- THIS WILL PLACE REAL ORDERS WITH REAL MONEY",
+        "=" * 70,
+        f"Today's plan: {plan}",
+        f"Margin capital (live, from Kite): Rs {engine.margin_capital:,.2f}",
+    ]
     if premarket_symbols:
-        print(
+        lines.append(
             f"Tranche A (premarket, {len(premarket_symbols)} stock(s) -- {sorted(premarket_symbols)}): "
             f"Rs {tranche_a_exposure:,.2f} exposure each"
         )
-        print(f"Tranche B (anything added after open): Rs {tranche_b_exposure:,.2f} exposure each")
+        lines.append(f"Tranche B (anything added after open): Rs {tranche_b_exposure:,.2f} exposure each")
     else:
-        print(f"No premarket tranche (session starting after market open) -- Rs {tranche_b_exposure:,.2f} exposure each")
+        lines.append(
+            f"No premarket tranche (session starting after market open) -- Rs {tranche_b_exposure:,.2f} exposure each"
+        )
     atr_desc = f"{engine.atr_multiplier}x" if engine.atr_multiplier is not None else "off (fixed %)"
-    print(f"Daily loss cap: Rs {engine.daily_loss_cap:,.2f}  |  Grid: {engine.grid_pct:.1%}  |  ATR trail: {atr_desc}")
-    print(f"Realized P&L today (seeded from Kite): Rs {engine.daily_pnl:,.2f}")
+    lines.append(f"Daily loss cap: Rs {engine.daily_loss_cap:,.2f}  |  Grid: {engine.grid_pct:.1%}  |  ATR trail: {atr_desc}")
+    lines.append(f"Realized P&L today (seeded from Kite): Rs {engine.daily_pnl:,.2f}")
     if engine.portfolio_profit_lock_trigger is not None:
-        print(
+        lines.append(
             f"Portfolio profit lock: arms at Rs {engine.portfolio_profit_lock_trigger:,.2f}, "
             f"giveback Rs {engine.portfolio_profit_lock_giveback or 0:,.2f}"
         )
     if engine.per_stock_stop_loss is not None:
-        print(f"Per-stock stop-loss: Rs {engine.per_stock_stop_loss:,.2f}")
+        lines.append(f"Per-stock stop-loss: Rs {engine.per_stock_stop_loss:,.2f}")
     if engine.open_positions:
-        print(f"\nRECONCILED {len(engine.open_positions)} existing real position(s) from a previous run today:")
+        lines.append(f"\nRECONCILED {len(engine.open_positions)} existing real position(s) from a previous run today:")
         for sym, pos in engine.open_positions.items():
-            print(f"  {sym}: {pos.direction} qty={pos.qty:.0f} avg_price={pos.avg_price:.2f} legs={pos.units_used}")
+            lines.append(f"  {sym}: {pos.direction} qty={pos.qty:.0f} avg_price={pos.avg_price:.2f} legs={pos.units_used}")
+    return "\n".join(lines)
+
+
+def _confirm_or_abort(summary: str) -> bool:
+    """Default (terminal) approval gate. Unchanged behaviour: prints the
+    summary and requires the exact confirmation phrase typed on stdin."""
+    print(summary)
     print()
     typed = input(f'Type exactly "{CONFIRM_PHRASE}" to proceed, anything else aborts: ')
     if typed.strip() != CONFIRM_PHRASE:
@@ -376,12 +473,30 @@ def _confirm_or_abort(
     return True
 
 
-def run_live(poll_interval: int = POLL_INTERVAL_SECONDS) -> None:
+def run_live(
+    poll_interval: int = POLL_INTERVAL_SECONDS,
+    confirm_fn=None,
+    notifier=None,
+    should_stop=None,
+) -> None:
     """Trade the grid strategy with REAL orders against today's plan.
 
     Safety gates, all of which must pass before a single order is placed:
     1. LIVE_TRADING_ENABLED=true must be explicitly set in .env.
     2. The user must type an exact confirmation phrase interactively.
+
+    The three optional hooks exist so this can be driven from somewhere other
+    than a terminal (src/telegram_control.py) WITHOUT weakening either gate:
+
+    - confirm_fn(summary) -> bool replaces where the approval is typed, not
+      whether one is required. Default None keeps the stdin prompt. A
+      confirm_fn that returns True without asking a human would defeat gate
+      2 entirely -- that is the caller's responsibility, and the only caller
+      that passes one still waits for a human to type CONFIRM.
+    - notifier(text) mirrors important events to a chat channel.
+    - should_stop() -> bool, polled each cycle, squares off everything and
+      ends the session. This is the panic button: it closes positions, it
+      does not abandon them.
 
     Entries use check-then-place-then-commit: GridEngine.can_enter() is a
     pure query, so we place the real order first and only record the
@@ -410,7 +525,7 @@ def run_live(poll_interval: int = POLL_INTERVAL_SECONDS) -> None:
     kite = auth.get_kite()
 
     today = _now().date()
-    logger = LiveLogger(LOG_DIR / f"live_{today.isoformat()}.jsonl")
+    logger = LiveLogger(LOG_DIR / f"live_{today.isoformat()}.jsonl", notifier=notifier)
     symbol_atr = kite_data.fetch_symbol_atr(list(plan.keys()))
     margin_capital = _fetch_margin_capital(kite)
     # Fixed at LIVE_CONCURRENT_SLOTS from the first confirmation of the day, regardless of
@@ -503,7 +618,10 @@ def run_live(poll_interval: int = POLL_INTERVAL_SECONDS) -> None:
 
     _reconcile_open_positions(kite, engine, symbol_atr, real_qty, entered_today, logger)
 
-    if not _confirm_or_abort(plan, engine, premarket_symbols, tranche_a_exposure, tranche_b_exposure):
+    summary = build_plan_summary(plan, engine, premarket_symbols, tranche_a_exposure, tranche_b_exposure)
+    approved = _confirm_or_abort(summary) if confirm_fn is None else confirm_fn(summary)
+    if not approved:
+        logger.event("confirmation_declined")
         return
 
     logger.event(
@@ -553,10 +671,27 @@ def run_live(poll_interval: int = POLL_INTERVAL_SECONDS) -> None:
         logger.event("order_result", symbol=symbol, order_id=order_id, **{k: v for k, v in result.items() if k != "raw"})
         return result
 
+    # Set once should_stop() first returns True and never cleared -- a stop is
+    # a one-way decision for the rest of the session. Re-arming mid-day would
+    # mean re-entering positions the user just asked to be out of.
+    stopping = False
+
     try:
         while True:
             now = _now().time()
+            if should_stop is not None and not stopping and should_stop():
+                stopping = True
+                logger.event("stop_requested")
             if now < MARKET_OPEN:
+                if stopping:
+                    # Nothing can be open yet (the market hasn't opened, and any
+                    # position reconciled from an earlier run today would imply
+                    # it had), so there is nothing to square off -- just end.
+                    # Without this the stop flag would be set but unreachable:
+                    # the square-off and break checks both live below this
+                    # `continue`, so the session would sleep here until 9:15.
+                    print("Stop requested before market open. Ending session; no orders placed.")
+                    break
                 time_module.sleep(min(poll_interval, 30))
                 continue
             if now >= MARKET_CLOSE:
@@ -597,7 +732,13 @@ def run_live(poll_interval: int = POLL_INTERVAL_SECONDS) -> None:
                     continue
                 current_prices[symbol] = quote["last_price"]
 
-                if symbol in plan and symbol not in entered_today and now < LATE_ENTRY_CUTOFF and engine.can_enter(symbol):
+                if (
+                    not stopping
+                    and symbol in plan
+                    and symbol not in entered_today
+                    and now < LATE_ENTRY_CUTOFF
+                    and engine.can_enter(symbol)
+                ):
                     direction = plan[symbol]
                     minutes_since_open = (
                         datetime.combine(_now().date(), now) - datetime.combine(_now().date(), MARKET_OPEN)
@@ -766,7 +907,8 @@ def run_live(poll_interval: int = POLL_INTERVAL_SECONDS) -> None:
                 else:
                     logger.event("portfolio_profit_lock_exit", symbol=symbol, price=fill["average_price"], qty=fill["filled_quantity"])
 
-            if now >= SQUARE_OFF_TIME and engine.open_positions:
+            if (now >= SQUARE_OFF_TIME or stopping) and engine.open_positions:
+                square_off_tag = "square_off" if now >= SQUARE_OFF_TIME else "manual_stop"
                 for result in engine.square_off(current_prices, _now()):
                     symbol = result["symbol"]
                     sell_qty = real_qty.pop(symbol, None)
@@ -778,7 +920,7 @@ def run_live(poll_interval: int = POLL_INTERVAL_SECONDS) -> None:
                         )
                         continue
                     transaction_type = "SELL" if result["direction"] == "long" else "BUY"
-                    fill = place_and_confirm(symbol, transaction_type, sell_qty, result["exit_price"], tag="square_off")
+                    fill = place_and_confirm(symbol, transaction_type, sell_qty, result["exit_price"], tag=square_off_tag)
                     if fill["status"] != "COMPLETE":
                         logger.critical(
                             f"{symbol} SQUARE-OFF order did NOT confirm filled -- "
@@ -796,7 +938,7 @@ def run_live(poll_interval: int = POLL_INTERVAL_SECONDS) -> None:
                 halted=engine.halted,
             )
 
-            if not engine.open_positions and (engine.halted or now >= SQUARE_OFF_TIME):
+            if not engine.open_positions and (engine.halted or stopping or now >= SQUARE_OFF_TIME):
                 print("All positions flat and day is done. Ending session.")
                 break
 

@@ -1,0 +1,53 @@
+# Telegram control bot -- the phone interface to the trading engine.
+#
+# Install on the Contabo box:
+#   sudo cp deploy/intraday-bot.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now intraday-bot
+#
+# Adjust User= and the paths below if the checkout isn't at
+# /home/trader/intraday-bot.
+
+[Unit]
+Description=Intraday grid trading bot -- Telegram control
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=trader
+WorkingDirectory=/home/trader/intraday-bot
+ExecStart=/home/trader/intraday-bot/.venv/bin/python3 scripts/run_bot.py
+
+# Restart on crash, but rate-limited: if it dies 5 times in 5 minutes it stays
+# down rather than thrashing. A bot that cannot start is a bot whose Telegram
+# messages you are not receiving -- that should be loud, not papered over by an
+# endless restart loop.
+Restart=on-failure
+RestartSec=15
+StartLimitBurst=5
+StartLimitIntervalSec=300
+
+# Unbuffered so `journalctl -fu intraday-bot` shows output as it happens
+# instead of in 4KB chunks.
+Environment=PYTHONUNBUFFERED=1
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=intraday-bot
+
+# Hardening. This process holds Kite credentials and can place real orders,
+# so it gets no more of the system than it needs.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+# ...except its own directory, which must stay writable for logs/, the daily
+# .kite_session.json, and the plan files the bot writes.
+ReadWritePaths=/home/trader/intraday-bot
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+
+[Install]
+WantedBy=multi-user.target
