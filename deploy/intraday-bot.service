@@ -13,20 +13,23 @@ Description=Intraday grid trading bot -- Telegram control
 After=network-online.target
 Wants=network-online.target
 
+# Crash-loop limiter. These are [Unit] directives -- systemd silently ignores
+# them under [Service], which is where they are easy to put by mistake.
+# 5 failures inside 5 minutes and it stays down rather than thrashing: a bot
+# that cannot start is a bot whose Telegram messages you are not receiving,
+# and that should be loud, not hidden behind an endless restart loop.
+StartLimitBurst=5
+StartLimitIntervalSec=300
+
 [Service]
 Type=simple
 User=trader
 WorkingDirectory=/home/trader/intraday-bot
 ExecStart=/home/trader/intraday-bot/.venv/bin/python3 scripts/run_bot.py
 
-# Restart on crash, but rate-limited: if it dies 5 times in 5 minutes it stays
-# down rather than thrashing. A bot that cannot start is a bot whose Telegram
-# messages you are not receiving -- that should be loud, not papered over by an
-# endless restart loop.
+# Restart on crash, rate-limited by the StartLimit* settings in [Unit] above.
 Restart=on-failure
 RestartSec=15
-StartLimitBurst=5
-StartLimitIntervalSec=300
 
 # Unbuffered so `journalctl -fu intraday-bot` shows output as it happens
 # instead of in 4KB chunks.

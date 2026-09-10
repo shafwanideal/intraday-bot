@@ -55,6 +55,20 @@ rather than mid-backtest. Kite kills tokens overnight, so it's a fresh value
 each trading day — and it's a live credential that can place orders, not just
 read data, so treat it like one.
 
+## Pre-flight check
+
+```bash
+.venv/bin/python3 scripts/preflight.py
+```
+
+Verifies the machine is ready to trade: Python version, packages, `.env` and
+its permissions, all four credentials, a live Telegram round-trip (it sends
+you a test message), today's Kite session, writable log directory, clock, and
+which trading mode the gate is in. Read-only apart from that test message --
+it places no orders. Exits 0 when ready, 1 with a list of what to fix.
+
+Run it after setup, and any morning something feels off.
+
 ## Phone control (Telegram)
 
 Runs the whole trading day from Telegram, so a VPS can host it with no SSH

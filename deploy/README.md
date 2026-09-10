@@ -63,6 +63,22 @@ drops every message from any other chat without replying. Anyone who finds
 your bot's handle can message it, and the bot can place real orders — so if
 you ever change Telegram accounts, update this.
 
+## Check it before wrapping it in a service
+
+```bash
+sudo -iu trader
+cd ~/intraday-bot
+.venv/bin/python3 scripts/preflight.py
+```
+
+This catches a bad token or a typo'd chat id now, at a terminal that shows you
+the error, rather than later inside systemd where the failure is a line in
+`journalctl` you have to go looking for. It sends a test message to your phone
+as proof the Telegram path actually works end to end.
+
+Fix anything it reports, re-run until it says READY, then `exit` back to your
+sudo user.
+
 ## Install the service
 
 ```bash
@@ -138,6 +154,16 @@ again, so re-confirming picks up where it left off — but check `/status`
 after any restart with money on the table.
 
 ## If something goes wrong
+
+First stop, always:
+
+```bash
+sudo -iu trader && cd ~/intraday-bot && .venv/bin/python3 scripts/preflight.py
+```
+
+It names the specific problem and the command that fixes it. Most setup
+failures are a typo in `.env` or a chat id from the wrong Telegram account.
+
 
 The bot sends a `⚠️ CRITICAL` message whenever a real order didn't confirm
 and the engine's view of a position may not match reality. That message
