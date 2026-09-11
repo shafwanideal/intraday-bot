@@ -34,13 +34,17 @@ PER_STOCK_STOP_LOSS = 2_000  # turned on as a live default 2026-08-28: closes a 
 # -1500 was backtest-tested and shown to cut some genuine recoveries too eagerly; -2000
 # is untested against real data but would have caught STARCEMENT's worst points -- revisit
 # once more real days exist under it.
-TRAIL_STOP = False  # turned off 2026-09-01, then superseded by PROFIT_EXIT below
-# the same day once it became clear a plain target_exit at GRID_PCT (what trail_stop
-# =False actually does) wasn't what was wanted either -- COALINDIA hit target and
-# closed in 2 minutes on 2026-09-02, which is direct target_exit behavior working
-# exactly as coded, but not the intent. Kept as False since PROFIT_EXIT=False now
-# skips this setting's branch entirely anyway.
-PROFIT_EXIT = False  # turned off as a live default 2026-09-02: NO automatic
+TRAIL_STOP = True  # restored as a live default 2026-09-11, reversing the 2026-09-02
+# "let it ride" decision below -- explicitly requested again: arm a trailing stop
+# once a position moves GRID_PCT (1.5%) in its favor, rather than no exit strategy
+# at all. Kept the full history of the prior decision below since the tradeoff it
+# describes (no downside protection between arming and square-off) is exactly what
+# this reversal is choosing to accept differently.
+PROFIT_EXIT = True  # restored 2026-09-11 alongside TRAIL_STOP above, for the same
+# reason -- profit_exit=False (below) skips the entire trailing/target block, so
+# both flags have to flip together to actually get a trailing stop back.
+# --- history: why this was turned off 2026-09-02, kept for context ---
+# Turned off as a live default 2026-09-02: NO automatic
 # profit-taking at all -- no fixed target, no trailing arm. A position now only
 # ever closes via square_off (3:15/3:30 PM), daily_loss_cap, per_stock_stop_loss
 # (if enabled), or portfolio_profit_lock. It rides the full move for better or
