@@ -45,8 +45,11 @@ CAVEATS (read before acting on these numbers):
   atr_multiplier docs for exactly how the trail distance is computed.
 - Grid trigger levels are evaluated on each 5-min bar's CLOSE, not tick by
   tick.
-- Leverage modeled at a flat 5x on margin -- verify actual Zerodha MIS
-  leverage per symbol via Kite's margin calculator before trading live.
+- No leverage (1x, changed from 5x on 2026-09-13) -- exposure is the literal
+  cash % of margin_capital you specify, not Zerodha's real MIS margin
+  multiplier. A re-run of this same plan after that date will show smaller
+  P&L than an earlier run under the old 5x default -- that's the leverage
+  change, not a code regression.
 - Transaction costs ARE modeled (brokerage, STT, exchange charges, SEBI
   charges, stamp duty, GST) on the leveraged order value. Slippage is NOT
   modeled.

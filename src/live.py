@@ -12,20 +12,18 @@ from kiteconnect.exceptions import KiteException
 from . import auth, config, kite_data, orders
 from .strategy import (
     AVERAGING_PCT,
-    DEFAULT_ATR_MULTIPLIER,
     ENABLE_AVERAGING,
     LEVERAGE,
     LIVE_CONCURRENT_SLOTS,
     MARGIN_CAPITAL,
     MAX_STOCKS_PER_DAY,
-    PORTFOLIO_PROFIT_LOCK_GIVEBACK,
-    PORTFOLIO_PROFIT_LOCK_TRIGGER,
     PREMARKET_TRANCHE_PCT,
     PROFIT_EXIT,
     SQUARE_OFF_TIME,
     TRAIL_STOP,
     GridEngine,
     Position,
+    compute_portfolio_profit_lock_trigger,
 )
 
 IST = ZoneInfo("Asia/Kolkata")
@@ -257,19 +255,76 @@ def _fetch_realized_pnl_today(kite) -> float:
         return 0.0
 
 
-def _load_todays_plan() -> dict[str, str]:
+def _parse_plan_entry(symbol: str, entry) -> tuple[str, float | None]:
+    """A plan-file entry for one symbol is either a plain direction string
+    (`"long"`) -- equal capital split across LIVE_CONCURRENT_SLOTS via the
+    tranche system below, the original behavior -- or
+    `{"direction": "long", "pct": 33}` to size that position at an explicit
+    percentage of margin_capital instead. Returns (direction, pct_or_None)."""
+    if isinstance(entry, str):
+        if entry not in ("long", "short"):
+            raise RuntimeError(f"Invalid direction '{entry}' for {symbol}.")
+        return entry, None
+    if not isinstance(entry, dict):
+        raise RuntimeError(f"Invalid plan entry for {symbol}: {entry!r} -- must be 'long'/'short' or a {{direction, pct}} object.")
+    direction = entry.get("direction")
+    if direction not in ("long", "short"):
+        raise RuntimeError(f"Invalid direction '{direction}' for {symbol}.")
+    pct = entry.get("pct")
+    if pct is not None:
+        try:
+            pct = float(pct)
+        except (TypeError, ValueError):
+            raise RuntimeError(f"pct for {symbol} must be a number, got {pct!r}.")
+        if not (0 < pct <= 100):
+            raise RuntimeError(f"pct for {symbol} must be between 0 and 100, got {pct}.")
+    return direction, pct
+
+
+def _validate_allocations(plan: dict[str, str], allocations: dict[str, float]) -> None:
+    """A day's plan must be ALL-or-NOTHING on explicit percentages: either
+    every symbol gives one (unambiguous capital math) or none do (the
+    original equal-split/tranche behavior). Mixing would leave the
+    unallocated symbols' share undefined -- stop on it immediately rather
+    than improvise a fallback split. Percentages summing past 100% would
+    deploy more than the day's margin capital -- almost always a typo."""
+    if not allocations:
+        return
+    missing = sorted(set(plan) - set(allocations))
+    if missing:
+        raise RuntimeError(
+            f"Some symbols have an explicit pct allocation and some don't: {missing} are missing one. "
+            "Give every symbol a pct, or none at all (equal split)."
+        )
+    total_pct = sum(allocations.values())
+    if total_pct > 100 + 1e-9:
+        raise RuntimeError(f"Percentages sum to {total_pct:.2f}%, which is over 100% of margin capital.")
+
+
+def _load_todays_plan() -> tuple[dict[str, str], dict[str, float]]:
+    """Returns (plan, allocations). `plan` maps symbol -> direction, same
+    shape as always. `allocations` maps symbol -> pct for any symbol whose
+    entry gave one; empty (not partial) unless every symbol in `plan` gave
+    one -- see _validate_allocations. An empty `allocations` means "equal
+    split, unchanged behavior" and every existing caller/plan file keeps
+    working exactly as before."""
     if not TODAYS_STOCKS_FILE.exists():
         raise RuntimeError(f"{TODAYS_STOCKS_FILE} not found.")
     with open(TODAYS_STOCKS_FILE) as f:
-        plan = json.load(f)
-    if not plan:
+        raw = json.load(f)
+    if not raw:
         raise RuntimeError(f"{TODAYS_STOCKS_FILE} is empty.")
-    if len(plan) > MAX_STOCKS_PER_DAY:
-        raise RuntimeError(f"{TODAYS_STOCKS_FILE} has {len(plan)} symbols but the max is {MAX_STOCKS_PER_DAY}.")
-    for symbol, direction in plan.items():
-        if direction not in ("long", "short"):
-            raise RuntimeError(f"Invalid direction '{direction}' for {symbol}.")
-    return plan
+    if len(raw) > MAX_STOCKS_PER_DAY:
+        raise RuntimeError(f"{TODAYS_STOCKS_FILE} has {len(raw)} symbols but the max is {MAX_STOCKS_PER_DAY}.")
+    plan: dict[str, str] = {}
+    allocations: dict[str, float] = {}
+    for symbol, entry in raw.items():
+        direction, pct = _parse_plan_entry(symbol, entry)
+        plan[symbol] = direction
+        if pct is not None:
+            allocations[symbol] = pct
+    _validate_allocations(plan, allocations)
+    return plan, allocations
 
 
 def _quantity_for(exposure: float, price: float) -> int:
@@ -422,11 +477,16 @@ def build_plan_summary(
     premarket_symbols: set[str],
     tranche_a_exposure: float,
     tranche_b_exposure: float,
+    allocations: dict[str, float] | None = None,
 ) -> str:
     """Everything the human needs to see before approving real orders, as
     plain text. Split out of the terminal prompt so the identical summary can
     be shown on a phone -- the approval decision must be made against the same
-    numbers regardless of which surface it arrives on."""
+    numbers regardless of which surface it arrives on.
+
+    `allocations` (symbol -> pct), when given, replaces the Tranche A/B
+    display with each symbol's actual explicit exposure -- the tranche split
+    doesn't apply once the human has chosen a specific % per stock."""
     lines = [
         "=" * 70,
         "LIVE TRADING MODE -- THIS WILL PLACE REAL ORDERS WITH REAL MONEY",
@@ -434,7 +494,13 @@ def build_plan_summary(
         f"Today's plan: {plan}",
         f"Margin capital (live, from Kite): Rs {engine.margin_capital:,.2f}",
     ]
-    if premarket_symbols:
+    if allocations:
+        lines.append("Allocation (explicit % of margin capital, leveraged):")
+        for symbol, direction in plan.items():
+            pct = allocations.get(symbol)
+            exposure = pct / 100.0 * engine.margin_capital * LEVERAGE
+            lines.append(f"  {symbol:12s} {direction:5s} {pct:5.1f}%  -> Rs {exposure:,.2f} exposure")
+    elif premarket_symbols:
         lines.append(
             f"Tranche A (premarket, {len(premarket_symbols)} stock(s) -- {sorted(premarket_symbols)}): "
             f"Rs {tranche_a_exposure:,.2f} exposure each"
@@ -448,10 +514,16 @@ def build_plan_summary(
     lines.append(f"Daily loss cap: Rs {engine.daily_loss_cap:,.2f}  |  Grid: {engine.grid_pct:.1%}  |  ATR trail: {atr_desc}")
     lines.append(f"Realized P&L today (seeded from Kite): Rs {engine.daily_pnl:,.2f}")
     if engine.portfolio_profit_lock_trigger is not None:
-        lines.append(
-            f"Portfolio profit lock: arms at Rs {engine.portfolio_profit_lock_trigger:,.2f}, "
-            f"giveback Rs {engine.portfolio_profit_lock_giveback or 0:,.2f}"
-        )
+        if engine.portfolio_profit_lock_fixed:
+            lines.append(
+                f"Portfolio profit floor: arms at Rs {engine.portfolio_profit_lock_trigger:,.2f} "
+                "-- fixed, closes everything if total P&L falls back to that level (no ratchet)"
+            )
+        else:
+            lines.append(
+                f"Portfolio profit lock: arms at Rs {engine.portfolio_profit_lock_trigger:,.2f}, "
+                f"giveback Rs {engine.portfolio_profit_lock_giveback or 0:,.2f}"
+            )
     if engine.per_stock_stop_loss is not None:
         lines.append(f"Per-stock stop-loss: Rs {engine.per_stock_stop_loss:,.2f}")
     if engine.open_positions:
@@ -521,7 +593,7 @@ def run_live(
             "gate -- add it explicitly if you actually intend to place real orders today."
         )
 
-    plan = _load_todays_plan()
+    plan, allocations = _load_todays_plan()
     kite = auth.get_kite()
 
     today = _now().date()
@@ -555,7 +627,10 @@ def run_live(
 
     engine = GridEngine(
         margin_capital=margin_capital,
-        atr_multiplier=DEFAULT_ATR_MULTIPLIER,
+        # atr_multiplier intentionally NOT set (None) as of 2026-09-13: the
+        # layered-trailing-stop/portfolio-floor spec wants a flat percentage trail
+        # (trail_pct, defaults to grid_pct/2 = 0.75%), not one scaled by each symbol's
+        # own ATR. Leaving atr_multiplier unset makes the engine fall back to trail_pct.
         max_concurrent_positions=max_concurrent_positions,
         total_units=total_units,
         averaging_pct=AVERAGING_PCT,
@@ -566,13 +641,18 @@ def run_live(
         # one-time choice per session start, same pattern as FRESH_LOSS_BUDGET) lets
         # today's floor be set to something other than the standing default without
         # editing strategy.py -- requested 2026-09-02 ("change today's floor as 500
-        # total P&L").
+        # total P&L"). The standing default itself is now 2.667% of the day's REAL
+        # margin_capital (2026-09-13 spec), not a fixed rupee figure -- see
+        # compute_portfolio_profit_lock_trigger.
         portfolio_profit_lock_trigger=(
             float(os.environ["PORTFOLIO_PROFIT_LOCK_TRIGGER_OVERRIDE"])
             if os.environ.get("PORTFOLIO_PROFIT_LOCK_TRIGGER_OVERRIDE", "").strip()
-            else PORTFOLIO_PROFIT_LOCK_TRIGGER
+            else compute_portfolio_profit_lock_trigger(margin_capital)
         ),
-        portfolio_profit_lock_giveback=PORTFOLIO_PROFIT_LOCK_GIVEBACK,
+        # fixed=True: floor pins at the trigger value forever once armed, rather than
+        # ratcheting up with the peak -- see check_portfolio_profit_lock. Makes
+        # portfolio_profit_lock_giveback irrelevant here (only used in ratcheting mode).
+        portfolio_profit_lock_fixed=True,
         # per_stock_stop_loss intentionally NOT wired in as a live default -- tested against
         # today's actual trades (2026-08-28) and it would have cut STARCEMENT right before
         # its partial recovery, making the day worse (-Rs 1,150 vs the real +Rs 33). Left
@@ -618,7 +698,7 @@ def run_live(
 
     _reconcile_open_positions(kite, engine, symbol_atr, real_qty, entered_today, logger)
 
-    summary = build_plan_summary(plan, engine, premarket_symbols, tranche_a_exposure, tranche_b_exposure)
+    summary = build_plan_summary(plan, engine, premarket_symbols, tranche_a_exposure, tranche_b_exposure, allocations)
     approved = _confirm_or_abort(summary) if confirm_fn is None else confirm_fn(summary)
     if not approved:
         logger.event("confirmation_declined")
@@ -699,20 +779,27 @@ def run_live(
                 break
 
             try:
-                latest_plan = _load_todays_plan()
+                latest_plan, latest_allocations = _load_todays_plan()
             except RuntimeError as exc:
                 logger.event("plan_reload_error", error=str(exc))
-                latest_plan = plan
+                latest_plan, latest_allocations = plan, allocations
             new_symbols = set(latest_plan.keys()) - set(plan.keys())
             if new_symbols:
                 try:
                     symbol_atr.update(kite_data.fetch_symbol_atr(list(new_symbols)))
                     plan = latest_plan
+                    # The whole file was just re-validated as one consistent set (see
+                    # _validate_allocations) -- safe to take it wholesale. Already-entered
+                    # symbols are unaffected: exposure is only read at entry time below,
+                    # and they've already entered, so editing their pct now does nothing
+                    # retroactively -- only a NEW entry uses the refreshed value.
+                    allocations = latest_allocations
                 except POLL_EXCEPTIONS as exc:
                     logger.event("atr_fetch_error", symbols=list(new_symbols), error=str(exc))
                     # Keep the old plan this round, retry next poll -- see shadow.py.
             else:
                 plan = latest_plan
+                allocations = latest_allocations
             watch_symbols = set(plan.keys()) | set(engine.open_positions.keys())
             instruments = [f"NSE:{sym}" for sym in watch_symbols]
 
@@ -745,7 +832,10 @@ def run_live(
                     ).total_seconds() / 60
                     near_open = 0 <= minutes_since_open <= NEAR_OPEN_WINDOW_MINUTES
                     ref_price = quote["ohlc"]["open"] if near_open else quote["last_price"]
-                    exposure = tranche_a_exposure if symbol in premarket_symbols else tranche_b_exposure
+                    if symbol in allocations:
+                        exposure = allocations[symbol] / 100.0 * engine.margin_capital * LEVERAGE
+                    else:
+                        exposure = tranche_a_exposure if symbol in premarket_symbols else tranche_b_exposure
                     quantity = _quantity_for(exposure, ref_price)
                     if quantity < 1:
                         logger.event("entry_skipped_zero_qty", symbol=symbol, ref_price=ref_price)

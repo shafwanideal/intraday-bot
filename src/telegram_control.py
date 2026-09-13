@@ -69,17 +69,61 @@ def _now() -> datetime:
     return datetime.now(IST)
 
 
-def parse_picks(text: str) -> dict[str, str]:
-    """Parse a free-typed plan into {SYMBOL: "long"|"short"}.
+def _parse_pct_token(token: str) -> float | None:
+    """A trailing token like '33%', '33', or '33.5%' -> 33.0. Returns None if
+    it doesn't look like a number at all (so the caller can fall back to
+    treating it as a direction word instead)."""
+    stripped = token.strip().rstrip("%")
+    try:
+        return float(stripped)
+    except ValueError:
+        return None
+
+
+def validate_plan_consistency(plan: dict[str, "str | dict"]) -> None:
+    """All-or-nothing on % allocation, mirroring src/live.py's
+    _validate_allocations: either every symbol in the plan gives a pct, or
+    none do. A partial mix leaves the un-allocated symbols' share undefined.
+    Also rejects percentages summing past 100%. Runs on the plan's raw
+    JSON-serializable shape (str entries or {direction, pct} dicts), so it
+    can validate both a freshly parsed message and a merged plan file."""
+    has_pct = {sym: isinstance(entry, dict) and entry.get("pct") is not None for sym, entry in plan.items()}
+    if any(has_pct.values()) and not all(has_pct.values()):
+        missing = sorted(sym for sym, given in has_pct.items() if not given)
+        raise ValueError(
+            f"Some symbols have a % allocation and some don't: {', '.join(missing)} missing one. "
+            "Give every symbol a %, or none at all (equal split)."
+        )
+    total_pct = sum(entry["pct"] for entry in plan.values() if isinstance(entry, dict) and entry.get("pct") is not None)
+    if total_pct > 100 + 1e-9:
+        raise ValueError(f"Percentages sum to {total_pct:.1f}%, which is over 100%.")
+
+
+def _describe_entry(entry: "str | dict") -> str:
+    """Human-readable one-liner for a plan entry, for chat display."""
+    if isinstance(entry, str):
+        return entry
+    pct = entry.get("pct")
+    return f"{entry['direction']} {pct:.1f}%" if pct is not None else entry["direction"]
+
+
+def parse_picks(text: str) -> dict[str, "str | dict"]:
+    """Parse a free-typed plan into {SYMBOL: "long"|"short"} or, when a %
+    allocation is given, {SYMBOL: {"direction": ..., "pct": ...}} -- the
+    same shape src/live.py's plan file accepts directly.
 
     Accepts what someone actually thumbs into a phone -- commas or newlines
-    between stocks, direction optional, any case:
-        "RVNL long, MAZDOCK short"
+    between stocks, direction optional, % optional, any case/order for the
+    trailing tokens:
+        "RVNL long, MAZDOCK short"           (no %, equal split)
         "rvnl, mazdock"
         "RVNL LONG\nBSE short"
+        "indigo short 33%\ngranules long 33%\nhdfc long 33%"
+        "RVNL 40%"                            (bare %, direction defaults long)
 
     Raises ValueError with a human-readable reason rather than guessing, so
-    a typo'd direction can never be silently traded as a long.
+    a typo'd direction (or an inconsistent mix of %-allocated and plain
+    entries) can never be silently traded wrong.
     """
     text = text.strip()
     for prefix in ("/picks", "/plan"):
@@ -90,7 +134,7 @@ def parse_picks(text: str) -> dict[str, str]:
     for sep in ("\n", ";"):
         text = text.replace(sep, ",")
 
-    plan: dict[str, str] = {}
+    plan: dict[str, "str | dict"] = {}
     for chunk in text.split(","):
         parts = chunk.split()
         if not parts:
@@ -98,22 +142,45 @@ def parse_picks(text: str) -> dict[str, str]:
         symbol = parts[0].upper().strip()
         if not symbol.replace("&", "").replace("-", "").isalnum():
             raise ValueError(f"'{parts[0]}' doesn't look like an NSE symbol.")
-        if len(parts) == 1:
-            direction = "long"
-        elif len(parts) == 2:
-            direction = parts[1].lower().strip()
-        else:
-            raise ValueError(f"Couldn't read '{chunk.strip()}' — expected 'SYMBOL' or 'SYMBOL long/short'.")
+
+        direction = "long"
+        pct: float | None = None
+        rest = parts[1:]
+        if len(rest) == 1:
+            # Ambiguous: a bare second token is either a direction word
+            # ("RVNL long") or a bare percentage ("RVNL 40%") -- a number
+            # can never be a direction word, so try that first.
+            maybe_pct = _parse_pct_token(rest[0])
+            if maybe_pct is not None:
+                pct = maybe_pct
+            else:
+                direction = rest[0].lower().strip()
+        elif len(rest) == 2:
+            direction = rest[0].lower().strip()
+            pct = _parse_pct_token(rest[1])
+            if pct is None:
+                raise ValueError(f"'{rest[1]}' isn't a % for {symbol} — expected e.g. '{symbol} {direction} 33%'.")
+        elif len(rest) > 2:
+            raise ValueError(f"Couldn't read '{chunk.strip()}' — expected 'SYMBOL', 'SYMBOL long/short', or 'SYMBOL long/short 33%'.")
+
         if direction in ("l", "buy"):
             direction = "long"
         elif direction in ("s", "sell"):
             direction = "short"
         if direction not in ("long", "short"):
             raise ValueError(f"'{direction}' isn't a direction for {symbol} — use long or short.")
-        if symbol in plan and plan[symbol] != direction:
-            raise ValueError(f"{symbol} is listed both long and short.")
-        plan[symbol] = direction
+        if pct is not None and not (0 < pct <= 100):
+            raise ValueError(f"% for {symbol} must be between 0 and 100, got {pct}.")
 
+        entry: "str | dict" = {"direction": direction, "pct": pct} if pct is not None else direction
+        if symbol in plan:
+            existing = plan[symbol]
+            existing_direction = existing["direction"] if isinstance(existing, dict) else existing
+            if existing_direction != direction:
+                raise ValueError(f"{symbol} is listed both long and short.")
+        plan[symbol] = entry
+
+    validate_plan_consistency(plan)
     if not plan:
         raise ValueError("No stocks found in that message.")
     if len(plan) > MAX_STOCKS:
@@ -224,7 +291,7 @@ class ControlBot:
             return
 
         self.staged_plan = plan
-        pretty = "\n".join(f"  {sym} {direction}" for sym, direction in plan.items())
+        pretty = "\n".join(f"  {sym} {_describe_entry(entry)}" for sym, entry in plan.items())
         self.say(
             f"Staged plan ({len(plan)} stock(s)):\n{pretty}\n\n"
             "Send /confirm to arm real trading (I'll show you the full sizing "
@@ -251,10 +318,20 @@ class ControlBot:
         if len(merged) > MAX_STOCKS:
             self.say(f"That would make {len(merged)} stocks; the daily max is {MAX_STOCKS}.")
             return
+        try:
+            validate_plan_consistency(merged)
+        except ValueError as exc:
+            self.say(
+                f"Can't add that: {exc}\n\n"
+                "The running plan is currently in one mode (all %-allocated or all equal-split) "
+                "-- match it, or restate the whole plan instead of adding."
+            )
+            return
         plan_file.write_text(json.dumps(merged, indent=2))
         # No restart needed: live.py re-reads this file on every poll and
         # fetches ATR for any symbol it hasn't seen before.
-        self.say(f"Added {', '.join(addition)}. Running plan is now: {merged}")
+        pretty = ", ".join(f"{sym} {_describe_entry(entry)}" for sym, entry in addition.items())
+        self.say(f"Added {pretty}. Running plan is now:\n" + "\n".join(f"  {sym} {_describe_entry(entry)}" for sym, entry in merged.items()))
 
     def handle_confirm(self) -> None:
         # Two distinct meanings, and confusing them would be dangerous: before
