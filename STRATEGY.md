@@ -111,6 +111,43 @@ Backtested against real 5-minute intraday data (Zerodha historical API,
   the next day — trading "the day after" is then trading stale news. Only
   results genuinely released after close reliably produced a next-day move.
 
+### ATR trail multiple — backtest finding (2026-09-13)
+
+Tested the trailing-SL trail distance as a multiple of 14-day ATR (0.25x
+through 2.0x) across 32 stock/date backtests (long positions, 1.5% arm
+threshold, ₹75,000 per position). Raw totals favored wider multiples,
+plateauing at 1.0x ATR (₹55,832 total vs ₹31,809 at 0.25x) — **but this
+result is not reliable as-is and should not be used directly**:
+
+- Every losing trade in the sample never armed the trailing stop at all
+  (the stock never moved +1.5% favorably), so trail width had zero effect
+  on any loss — the dataset contains no genuine "armed, then reversed
+  hard" loss case to show the downside of a wide trail.
+- Most winning trades were exceptional single-day trend moves (many +8%
+  to +17%), several chosen specifically because they were already known
+  to be big movers that day — this overweights the sample toward days
+  where "just let it ride" wins by construction.
+- The few cases that DID show a genuine arm-then-pullback pattern
+  (TEJASNET, DBL, REDINGTON, GESHIP) consistently favored a tighter trail
+  (0.25x–0.5x ATR), the opposite direction from the raw total.
+
+**Conclusion: do not set the ATR multiple to 1.0x+ based on this test.**
+Use 0.5x ATR as the standing default, with 0.75x as an acceptable more
+lenient alternative. Before trusting any multiple choice for live
+trading, re-run this sweep on a large, unbiased sample — e.g., every
+trading day over 2–3 months for a fixed stock list — rather than a
+hand-picked set of days.
+
+This finding concerns `backtest.py`'s optional ATR-scaled trail
+(`atr_multiplier`, default `strategy.DEFAULT_ATR_MULTIPLIER = 0.5` — already
+matches the recommendation above, no code change needed). It does **not**
+describe current live/shadow behavior: since the 2026-09-13 rewrite,
+`live.py`/`shadow.py` use a flat percentage trail (arm at +1.5%, trail
+0.75% behind peak) with no ATR involved at all. The rest of this document
+predates that rewrite and is stale in several other places (leverage,
+loss cap, arm threshold) — treat sections above this one as historical
+background, not current behavior.
+
 ---
 
 ## Swing variant — entry trigger comparison (2026-09-07)
