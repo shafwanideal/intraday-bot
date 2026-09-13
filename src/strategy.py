@@ -5,7 +5,15 @@ MARGIN_CAPITAL = 50_000  # DEFAULT/fallback only -- live.py and shadow.py size o
 # account's actual available cash each day instead; this is what backtests use.
 TOTAL_UNITS = 4
 MARGIN_PER_UNIT = MARGIN_CAPITAL / TOTAL_UNITS  # 12,500
-LEVERAGE = 5  # Zerodha MIS intraday leverage on equity; varies per stock in reality
+LEVERAGE = 1  # changed 2026-09-13 from 5x: the layered-trailing-stop/portfolio-floor
+# strategy spec explicitly calls for no leverage -- exposure is the literal cash %
+# allocated per stock, not Zerodha's real MIS margin multiplier. Deliberate, not an
+# oversight: the spec's own sizing section names the 5x default and overrides it.
+# Old value (5x, Zerodha MIS intraday leverage on equity; varies per stock in
+# reality) is still what run_daily_plan_backtest.py's historical dated entries were
+# actually traded/backtested under -- changing this constant changes their
+# interpretation retroactively if re-run, which is a known tradeoff of a shared
+# global default rather than a per-strategy-version setting.
 MAX_CONCURRENT_POSITIONS = 3  # DEFAULT/fallback -- this is what backtest.py uses.
 MAX_STOCKS_PER_DAY = 20  # sanity ceiling to catch a typo/fat-fingered plan file, not a real
 # business limit -- capital splits evenly across however many stocks are actually given, so
@@ -34,13 +42,17 @@ PER_STOCK_STOP_LOSS = 2_000  # turned on as a live default 2026-08-28: closes a 
 # -1500 was backtest-tested and shown to cut some genuine recoveries too eagerly; -2000
 # is untested against real data but would have caught STARCEMENT's worst points -- revisit
 # once more real days exist under it.
-TRAIL_STOP = False  # turned off 2026-09-01, then superseded by PROFIT_EXIT below
-# the same day once it became clear a plain target_exit at GRID_PCT (what trail_stop
-# =False actually does) wasn't what was wanted either -- COALINDIA hit target and
-# closed in 2 minutes on 2026-09-02, which is direct target_exit behavior working
-# exactly as coded, but not the intent. Kept as False since PROFIT_EXIT=False now
-# skips this setting's branch entirely anyway.
-PROFIT_EXIT = False  # turned off as a live default 2026-09-02: NO automatic
+TRAIL_STOP = True  # restored as a live default 2026-09-11, reversing the 2026-09-02
+# "let it ride" decision below -- explicitly requested again: arm a trailing stop
+# once a position moves GRID_PCT (1.5%) in its favor, rather than no exit strategy
+# at all. Kept the full history of the prior decision below since the tradeoff it
+# describes (no downside protection between arming and square-off) is exactly what
+# this reversal is choosing to accept differently.
+PROFIT_EXIT = True  # restored 2026-09-11 alongside TRAIL_STOP above, for the same
+# reason -- profit_exit=False (below) skips the entire trailing/target block, so
+# both flags have to flip together to actually get a trailing stop back.
+# --- history: why this was turned off 2026-09-02, kept for context ---
+# Turned off as a live default 2026-09-02: NO automatic
 # profit-taking at all -- no fixed target, no trailing arm. A position now only
 # ever closes via square_off (3:15/3:30 PM), daily_loss_cap, per_stock_stop_loss
 # (if enabled), or portfolio_profit_lock. It rides the full move for better or
@@ -64,35 +76,55 @@ ENABLE_AVERAGING = False  # turned off as a live default 2026-08-28. STARCEMENT 
 # session showed averaging net-positive on the accumulated data overall, so this is a
 # deliberate tradeoff -- giving up averaging's upside on days it works to remove the downside
 # risk of a position doubling down into a real decline. Revisit with more real days either way.
-DAILY_LOSS_CAP = 3_000  # standing default at/under DAILY_LOSS_CAP_BASE_CAPITAL -- see
-# compute_daily_loss_cap() below. Replaced the old 20%-of-capital cap (Rs 10,000 on a
-# Rs 50,000 day, Rs 20,000 on a Rs 1L day) on 2026-09-01 after a real Rs 5,000 loss day --
-# that cap was far too loose to actually stop a bad day early. Requested explicitly:
-# floor of Rs 3,000 for capital <= Rs 1L, scaling up Rs 500 per extra Rs 50,000 of capital
-# (Rs 3,500 at Rs 1.5L, Rs 4,000 at Rs 2L) so the cap stays roughly proportional to risk
-# as the account grows without being as loose as the old 20% ratio.
-DAILY_LOSS_CAP_BASE_CAPITAL = 100_000  # capital at/under which the cap is pinned to the floor
-DAILY_LOSS_CAP_STEP = 500  # cap increases by this much per DAILY_LOSS_CAP_STEP_CAPITAL of
-# capital above the base -- e.g. Rs 150,000 -> 3,000 + 500 = Rs 3,500
+DAILY_LOSS_CAP = 3_000  # DEFAULT/fallback only, at MARGIN_CAPITAL -- live.py/shadow.py
+# compute the real cap fresh each day via compute_daily_loss_cap(actual margin_capital).
+# --- history, kept for context: the stepped-floor formula this replaced 2026-09-13 ---
+# Was: Rs 3,000 floor for capital <= Rs 1L, +Rs 500 per +Rs 50,000 above that (Rs 3,500 at
+# 1.5L, Rs 4,000 at 2L) -- itself adopted 2026-09-01 after a real Rs 5,000 loss day showed
+# the OLDER 20%-of-capital cap (Rs 10,000 on a Rs 50,000 day) far too loose to stop a bad
+# day early. DAILY_LOSS_CAP_BASE_CAPITAL/STEP/STEP_CAPITAL below are unused now but left
+# in case that stepped shape is ever wanted again.
+DAILY_LOSS_CAP_BASE_CAPITAL = 100_000
+DAILY_LOSS_CAP_STEP = 500
 DAILY_LOSS_CAP_STEP_CAPITAL = 50_000
+DAILY_LOSS_CAP_PCT = 0.04  # 2026-09-13: the layered-trailing-stop/portfolio-floor spec
+# calls for a straight -4% of the day's fund, scaling linearly with capital (Rs 3,000 on
+# Rs 75,000, Rs 4,000 on Rs 1L) -- replacing the stepped-floor shape above, which was NOT
+# proportional at every capital level (e.g. Rs 3,000 on Rs 50,000 is 6%, not 4%).
+# Known real-world gap, proven in testing: this is only checked every 5-min bar close in
+# backtest and every poll interval live -- a fast/violent move can overshoot it before the
+# close/exit fires. Budget roughly Rs 3,000-3,500 worst case on a Rs 75,000 fund, not an
+# exact ceiling.
 
 
 def compute_daily_loss_cap(margin_capital: float) -> float:
-    """Rs 3,000 floor for any capital <= Rs 1L; above that, +Rs 500 per +Rs 50,000 of
-    capital. E.g. Rs 50k/1L -> 3,000, Rs 1.5L -> 3,500, Rs 2L -> 4,000."""
-    if margin_capital <= DAILY_LOSS_CAP_BASE_CAPITAL:
-        return DAILY_LOSS_CAP
-    excess = margin_capital - DAILY_LOSS_CAP_BASE_CAPITAL
-    return DAILY_LOSS_CAP + (excess / DAILY_LOSS_CAP_STEP_CAPITAL) * DAILY_LOSS_CAP_STEP
-PORTFOLIO_PROFIT_LOCK_TRIGGER = 3000  # raised 700 -> 1000 -> 3000 through 2026-08-28; the
-# 3000 figure is now the standing default, not a one-day-only setting. Once
-# total (realized + unrealized) day P&L first crosses this, arm and start trailing the peak.
-PORTFOLIO_PROFIT_LOCK_GIVEBACK = 500  # raised from 300 alongside the trigger. If total P&L
-# then pulls back this much from its peak after arming, everything closes immediately.
-# Genuine trailing stop on the whole day's P&L, not a fixed floor -- the lock level itself
-# ratchets up as the peak grows. Set either to None (in the GridEngine call) to disable;
-# not backtest-proven -- see the sweeps in grid_pct_and_costs memory for why the backtest
-# evidence was thin before this was turned on.
+    """Straight DAILY_LOSS_CAP_PCT (4%) of the day's actual fund. Replaced the old
+    stepped-floor shape 2026-09-13 -- see history above compute_daily_loss_cap's
+    constants for why."""
+    return DAILY_LOSS_CAP_PCT * margin_capital
+
+
+PORTFOLIO_PROFIT_LOCK_TRIGGER = 3000  # DEFAULT/fallback only, at MARGIN_CAPITAL --
+# live.py/shadow.py compute the real trigger fresh each day via
+# compute_portfolio_profit_lock_trigger(actual margin_capital).
+PORTFOLIO_PROFIT_LOCK_TRIGGER_PCT = 0.02667  # 2026-09-13: the layered-trailing-stop
+# spec calls for the profit floor to arm at 2.667% of the day's fund (e.g. Rs 2,000 on
+# Rs 75,000), not a fixed rupee figure that stays Rs 3,000 regardless of capital.
+
+
+def compute_portfolio_profit_lock_trigger(margin_capital: float) -> float:
+    """Straight PORTFOLIO_PROFIT_LOCK_TRIGGER_PCT (2.667%) of the day's actual fund."""
+    return PORTFOLIO_PROFIT_LOCK_TRIGGER_PCT * margin_capital
+
+
+PORTFOLIO_PROFIT_LOCK_GIVEBACK = 500  # only meaningful when portfolio_profit_lock_fixed=False
+# (the original ratcheting behavior -- see GridEngine.check_portfolio_profit_lock). If total
+# P&L pulls back this much from its peak after arming, everything closes; the lock level
+# itself ratchets up as the peak grows. raised from 300 alongside the trigger through
+# 2026-08-28; not backtest-proven on its own -- see the sweeps in grid_pct_and_costs memory.
+# 2026-09-13: the layered-trailing-stop spec instead wants a FIXED floor pinned at the
+# arming value forever (no ratchet at all) -- see portfolio_profit_lock_fixed=True, which
+# live.py/shadow.py now pass, making this giveback value irrelevant to them.
 SQUARE_OFF_TIME = time(15, 8)  # moved earlier from 15:12 on 2026-08-26 -- Kite itself REJECTS MIS orders
 # placed AT or after 15:12 ("Intraday orders (MIS) are allowed only till 3:12 PM"), so a square-off
 # attempt landing exactly at 15:12 is already too late. On 2026-08-26 this happened for real -- all
@@ -205,6 +237,7 @@ class GridEngine:
         per_stock_stop_loss: float | None = None,
         portfolio_profit_lock_trigger: float | None = None,
         portfolio_profit_lock_giveback: float | None = None,
+        portfolio_profit_lock_fixed: bool = False,
     ):
         self.grid_pct = grid_pct
         # None means "not explicitly overridden" -- defaults to grid_pct so existing callers
@@ -246,6 +279,16 @@ class GridEngine:
         # capped -- only armed once, then only fires on the pullback.
         self.portfolio_profit_lock_trigger = portfolio_profit_lock_trigger
         self.portfolio_profit_lock_giveback = portfolio_profit_lock_giveback
+        # False (default): the original genuine trailing stop on whole-day P&L -- the
+        # floor ratchets up as the peak grows (see check_portfolio_profit_lock).
+        # True: a fixed floor pinned at the trigger value forever, never rising further
+        # even as profit grows -- the layered-trailing-stop/portfolio-floor spec's
+        # "Portfolio Profit Floor (fixed, not ratcheting)" rule, requested 2026-09-13.
+        # This is NOT the same as giveback=0 on the ratcheting version: giveback=0 there
+        # still ratchets floor=max(peak,trigger) up with the peak, so it fires on the very
+        # next tick that isn't itself a new peak -- far too twitchy. Fixed mode ignores
+        # the peak (and giveback) entirely once armed.
+        self.portfolio_profit_lock_fixed = portfolio_profit_lock_fixed
         self.portfolio_profit_lock_armed = False
         self.portfolio_profit_lock_peak = 0.0
 
@@ -399,14 +442,23 @@ class GridEngine:
 
     def check_portfolio_profit_lock(self, current_prices: dict[str, float], timestamp) -> list[dict]:
         """Once total (realized + unrealized) P&L first crosses
-        portfolio_profit_lock_trigger, arm and start tracking the peak total
-        P&L reached since. If total P&L then pulls back
-        portfolio_profit_lock_giveback (rupees) from that peak, close
-        everything immediately. The floor itself ratchets up as the peak
-        grows -- this is a genuine trailing stop on the whole day's P&L, not
-        a fixed floor at the trigger level. Never caps the upside on its own;
-        only fires on the pullback. Halts further entries once triggered,
-        same as the loss cap, since a profit has already been locked in."""
+        portfolio_profit_lock_trigger, arm.
+
+        Two distinct modes from there, selected by portfolio_profit_lock_fixed:
+
+        - False (default): track the peak total P&L reached since arming. If
+          total then pulls back portfolio_profit_lock_giveback (rupees) from
+          that peak, close everything -- a genuine trailing stop on the
+          whole day's P&L, floor ratchets UP as the peak grows.
+        - True: the floor is pinned at the trigger value forever, never
+          rising with the peak -- close everything the moment total P&L
+          falls back to <= the trigger. Simpler and stricter: it gives up
+          all upside past the trigger the instant it stops climbing,
+          rather than riding a rising peak down by `giveback`.
+
+        Neither mode caps the upside on its own -- only fires on the
+        pullback/fallback. Halts further entries once triggered, same as
+        the loss cap, since a profit has already been locked in."""
         if self.halted or not self.open_positions or self.portfolio_profit_lock_trigger is None:
             return []
         unrealized = sum(
@@ -421,13 +473,16 @@ class GridEngine:
                 self.portfolio_profit_lock_peak = total
             return []
 
-        self.portfolio_profit_lock_peak = max(self.portfolio_profit_lock_peak, total)
-        giveback = self.portfolio_profit_lock_giveback if self.portfolio_profit_lock_giveback is not None else 0.0
-        # Floor never drops below the original trigger itself -- it only ratchets UP once the
-        # peak grows past trigger + giveback. Same "floor" pattern as the per-position profit
-        # lock: 700 is the guaranteed worst case once armed, not just a starting point giveback
-        # can erode below.
-        floor = max(self.portfolio_profit_lock_peak - giveback, self.portfolio_profit_lock_trigger)
+        if self.portfolio_profit_lock_fixed:
+            floor = self.portfolio_profit_lock_trigger
+        else:
+            self.portfolio_profit_lock_peak = max(self.portfolio_profit_lock_peak, total)
+            giveback = self.portfolio_profit_lock_giveback if self.portfolio_profit_lock_giveback is not None else 0.0
+            # Floor never drops below the original trigger itself -- it only ratchets UP once the
+            # peak grows past trigger + giveback. Same "floor" pattern as the per-position profit
+            # lock: 700 is the guaranteed worst case once armed, not just a starting point giveback
+            # can erode below.
+            floor = max(self.portfolio_profit_lock_peak - giveback, self.portfolio_profit_lock_trigger)
         if total <= floor:
             self.halted = True
             return [

@@ -16,19 +16,17 @@ from . import auth, kite_data
 POLL_EXCEPTIONS = (KiteException, requests.exceptions.RequestException)
 from .strategy import (
     AVERAGING_PCT,
-    DEFAULT_ATR_MULTIPLIER,
     ENABLE_AVERAGING,
     LEVERAGE,
     LIVE_CONCURRENT_SLOTS,
     MARGIN_CAPITAL,
     MAX_STOCKS_PER_DAY,
-    PORTFOLIO_PROFIT_LOCK_GIVEBACK,
-    PORTFOLIO_PROFIT_LOCK_TRIGGER,
     PREMARKET_TRANCHE_PCT,
     PROFIT_EXIT,
     SQUARE_OFF_TIME,
     TRAIL_STOP,
     GridEngine,
+    compute_portfolio_profit_lock_trigger,
 )
 
 # NSE trades on IST wall-clock time regardless of what timezone the machine
@@ -66,24 +64,71 @@ def _fetch_margin_capital(kite) -> float:
         return MARGIN_CAPITAL
 
 
-def load_todays_plan() -> dict[str, str]:
+def _parse_plan_entry(symbol: str, entry) -> tuple[str, float | None]:
+    """Mirrors src/live.py's _parse_plan_entry -- see there for the full
+    rationale. A plan-file entry is either a plain direction string (equal
+    split, original behavior) or {"direction": ..., "pct": ...} to size that
+    position at an explicit percentage of margin_capital."""
+    if isinstance(entry, str):
+        if entry not in ("long", "short"):
+            raise RuntimeError(f"Invalid direction '{entry}' for {symbol} -- must be 'long' or 'short'.")
+        return entry, None
+    if not isinstance(entry, dict):
+        raise RuntimeError(f"Invalid plan entry for {symbol}: {entry!r} -- must be 'long'/'short' or a {{direction, pct}} object.")
+    direction = entry.get("direction")
+    if direction not in ("long", "short"):
+        raise RuntimeError(f"Invalid direction '{direction}' for {symbol} -- must be 'long' or 'short'.")
+    pct = entry.get("pct")
+    if pct is not None:
+        try:
+            pct = float(pct)
+        except (TypeError, ValueError):
+            raise RuntimeError(f"pct for {symbol} must be a number, got {pct!r}.")
+        if not (0 < pct <= 100):
+            raise RuntimeError(f"pct for {symbol} must be between 0 and 100, got {pct}.")
+    return direction, pct
+
+
+def _validate_allocations(plan: dict[str, str], allocations: dict[str, float]) -> None:
+    """Mirrors src/live.py's _validate_allocations -- all-or-nothing per day."""
+    if not allocations:
+        return
+    missing = sorted(set(plan) - set(allocations))
+    if missing:
+        raise RuntimeError(
+            f"Some symbols have an explicit pct allocation and some don't: {missing} are missing one. "
+            "Give every symbol a pct, or none at all (equal split)."
+        )
+    total_pct = sum(allocations.values())
+    if total_pct > 100 + 1e-9:
+        raise RuntimeError(f"Percentages sum to {total_pct:.2f}%, which is over 100% of margin capital.")
+
+
+def load_todays_plan() -> tuple[dict[str, str], dict[str, float]]:
+    """Returns (plan, allocations) -- see src/live.py's _load_todays_plan
+    docstring. Empty allocations means equal split, unchanged behavior."""
     if not TODAYS_STOCKS_FILE.exists():
         raise RuntimeError(
             f"{TODAYS_STOCKS_FILE} not found. Copy todays_stocks.example.json to "
             "todays_stocks.json and fill in today's picks before running shadow mode."
         )
     with open(TODAYS_STOCKS_FILE) as f:
-        plan = json.load(f)
-    if not plan:
+        raw = json.load(f)
+    if not raw:
         raise RuntimeError(f"{TODAYS_STOCKS_FILE} is empty -- add at least one symbol.")
-    if len(plan) > MAX_STOCKS_PER_DAY:
+    if len(raw) > MAX_STOCKS_PER_DAY:
         raise RuntimeError(
-            f"{TODAYS_STOCKS_FILE} has {len(plan)} symbols but the max is {MAX_STOCKS_PER_DAY}. Trim the list."
+            f"{TODAYS_STOCKS_FILE} has {len(raw)} symbols but the max is {MAX_STOCKS_PER_DAY}. Trim the list."
         )
-    for symbol, direction in plan.items():
-        if direction not in ("long", "short"):
-            raise RuntimeError(f"Invalid direction '{direction}' for {symbol} -- must be 'long' or 'short'.")
-    return plan
+    plan: dict[str, str] = {}
+    allocations: dict[str, float] = {}
+    for symbol, entry in raw.items():
+        direction, pct = _parse_plan_entry(symbol, entry)
+        plan[symbol] = direction
+        if pct is not None:
+            allocations[symbol] = pct
+    _validate_allocations(plan, allocations)
+    return plan, allocations
 
 
 class ShadowLogger:
@@ -113,7 +158,7 @@ def run_shadow(poll_interval: int = POLL_INTERVAL_SECONDS) -> None:
     LATE_ENTRY_CUTOFF of square-off -- not enough of the day left for the
     strategy to do anything with a fresh position.
     """
-    plan = load_todays_plan()
+    plan, allocations = load_todays_plan()
     original_symbols = set(plan.keys())
     kite = auth.get_kite()
 
@@ -134,15 +179,19 @@ def run_shadow(poll_interval: int = POLL_INTERVAL_SECONDS) -> None:
 
     engine = GridEngine(
         margin_capital=margin_capital,
-        atr_multiplier=DEFAULT_ATR_MULTIPLIER,
+        # atr_multiplier intentionally NOT set -- see live.py's identical comment;
+        # falls back to trail_pct (flat 0.75%, grid_pct/2 by default).
         max_concurrent_positions=max_concurrent_positions,
         total_units=total_units,
         averaging_pct=AVERAGING_PCT,
         enable_averaging=ENABLE_AVERAGING,
         trail_stop=TRAIL_STOP,
         profit_exit=PROFIT_EXIT,
-        portfolio_profit_lock_trigger=PORTFOLIO_PROFIT_LOCK_TRIGGER,
-        portfolio_profit_lock_giveback=PORTFOLIO_PROFIT_LOCK_GIVEBACK,
+        # 2.667% of the day's real margin_capital, not a fixed rupee figure -- see
+        # compute_portfolio_profit_lock_trigger. fixed=True: pinned floor, no ratchet --
+        # see live.py's identical comment on check_portfolio_profit_lock.
+        portfolio_profit_lock_trigger=compute_portfolio_profit_lock_trigger(margin_capital),
+        portfolio_profit_lock_fixed=True,
         # per_stock_stop_loss intentionally NOT wired in as a live default -- see live.py.
     )
     entered_today: set[str] = set()
@@ -150,7 +199,13 @@ def run_shadow(poll_interval: int = POLL_INTERVAL_SECONDS) -> None:
     print(f"SHADOW MODE (paper trading, no real orders) -- {today}")
     print(f"Plan: {plan}")
     print(f"Margin capital (live, from Kite): Rs {margin_capital:,.2f}")
-    if premarket_symbols:
+    if allocations:
+        print("Allocation (explicit % of margin capital):")
+        for symbol, direction in plan.items():
+            pct = allocations.get(symbol)
+            exposure = pct / 100.0 * margin_capital * LEVERAGE
+            print(f"  {symbol:12s} {direction:5s} {pct:5.1f}%  -> Rs {exposure:,.2f} exposure")
+    elif premarket_symbols:
         print(f"Tranche A (premarket, {sorted(premarket_symbols)}): Rs {tranche_a_exposure:,.2f} each")
         print(f"Tranche B (added after open): Rs {tranche_b_exposure:,.2f} each")
     else:
@@ -179,10 +234,10 @@ def run_shadow(poll_interval: int = POLL_INTERVAL_SECONDS) -> None:
                 break
 
             try:
-                latest_plan = load_todays_plan()
+                latest_plan, latest_allocations = load_todays_plan()
             except RuntimeError as exc:
                 logger.event("plan_reload_error", error=str(exc))
-                latest_plan = plan
+                latest_plan, latest_allocations = plan, allocations
             new_symbols = set(latest_plan.keys()) - set(plan.keys())
             if new_symbols:
                 try:
@@ -191,6 +246,7 @@ def run_shadow(poll_interval: int = POLL_INTERVAL_SECONDS) -> None:
                     for symbol in new_symbols:
                         logger.event("plan_updated", symbol=symbol, direction=latest_plan[symbol], atr=symbol_atr.get(symbol))
                     plan = latest_plan
+                    allocations = latest_allocations  # see live.py's identical comment
                 except POLL_EXCEPTIONS as exc:
                     logger.event("atr_fetch_error", symbols=list(new_symbols), error=str(exc))
                     # Keep the old plan this round (don't adopt the new symbols
@@ -199,6 +255,7 @@ def run_shadow(poll_interval: int = POLL_INTERVAL_SECONDS) -> None:
                     # trail instead of what was actually intended.
             else:
                 plan = latest_plan
+                allocations = latest_allocations
             # Always keep watching any symbol with an open position, even if it's
             # since been removed from today's file -- an existing paper position
             # can't just be abandoned because the file changed.
@@ -223,7 +280,10 @@ def run_shadow(poll_interval: int = POLL_INTERVAL_SECONDS) -> None:
                     direction = plan[symbol]
                     is_original = symbol in original_symbols
                     entry_price = quote["ohlc"]["open"] if is_original else quote["last_price"]
-                    exposure = tranche_a_exposure if symbol in premarket_symbols else tranche_b_exposure
+                    if symbol in allocations:
+                        exposure = allocations[symbol] / 100.0 * margin_capital * LEVERAGE
+                    else:
+                        exposure = tranche_a_exposure if symbol in premarket_symbols else tranche_b_exposure
                     quantity = exposure / entry_price
                     if engine.enter(symbol, entry_price, direction, _now(), atr=symbol_atr.get(symbol), quantity=quantity):
                         entered_today.add(symbol)

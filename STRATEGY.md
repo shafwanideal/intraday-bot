@@ -111,6 +111,114 @@ Backtested against real 5-minute intraday data (Zerodha historical API,
   the next day — trading "the day after" is then trading stale news. Only
   results genuinely released after close reliably produced a next-day move.
 
+### ATR trail multiple — backtest finding (2026-09-13)
+
+Tested the trailing-SL trail distance as a multiple of 14-day ATR (0.25x
+through 2.0x) across 32 stock/date backtests (long positions, 1.5% arm
+threshold, ₹75,000 per position). Raw totals favored wider multiples,
+plateauing at 1.0x ATR (₹55,832 total vs ₹31,809 at 0.25x) — **but this
+result is not reliable as-is and should not be used directly**:
+
+- Every losing trade in the sample never armed the trailing stop at all
+  (the stock never moved +1.5% favorably), so trail width had zero effect
+  on any loss — the dataset contains no genuine "armed, then reversed
+  hard" loss case to show the downside of a wide trail.
+- Most winning trades were exceptional single-day trend moves (many +8%
+  to +17%), several chosen specifically because they were already known
+  to be big movers that day — this overweights the sample toward days
+  where "just let it ride" wins by construction.
+- The few cases that DID show a genuine arm-then-pullback pattern
+  (TEJASNET, DBL, REDINGTON, GESHIP) consistently favored a tighter trail
+  (0.25x–0.5x ATR), the opposite direction from the raw total.
+
+**Conclusion: do not set the ATR multiple to 1.0x+ based on this test.**
+Use 0.5x ATR as the standing default, with 0.75x as an acceptable more
+lenient alternative. Before trusting any multiple choice for live
+trading, re-run this sweep on a large, unbiased sample — e.g., every
+trading day over 2–3 months for a fixed stock list — rather than a
+hand-picked set of days.
+
+This finding concerns `backtest.py`'s optional ATR-scaled trail
+(`atr_multiplier`, default `strategy.DEFAULT_ATR_MULTIPLIER = 0.5` — already
+matches the recommendation above, no code change needed). It does **not**
+describe current live/shadow behavior: since the 2026-09-13 rewrite,
+`live.py`/`shadow.py` use a flat percentage trail (arm at +1.5%, trail
+0.75% behind peak) with no ATR involved at all. The rest of this document
+predates that rewrite and is stale in several other places (leverage,
+loss cap, arm threshold) — treat sections above this one as historical
+background, not current behavior.
+
+---
+
+## Swing variant — entry trigger comparison (2026-09-07)
+
+The swing/positional variant (`src/swing_strategy.py`: multi-day holds,
+unlimited averaging legs, no stop-loss, delivery costs) was tested with two
+entry triggers over a 252-trading-day entry window, ₹2,00,000 per leg, a
+₹15,00,000 total capital cap, positions carried to 2026-09-07. Both arms share
+one data fetch and one simulation loop, so the only difference is the trigger.
+Run it with `scripts/compare_entry_triggers.py`.
+
+| | 52w_low (Nifty 50 / 200) | rsi_dip (Nifty 50 / 200) |
+|---|---|---|
+| Positions opened | 14 / 19 | 5 / 17 |
+| Closed trades | 11 / 16 | 5 / 16 |
+| Win rate | 100% / 100% | 100% / 94% |
+| Realized | +₹56,841 / +₹77,275 | +₹44,298 / +₹85,506 |
+| Unrealized (open) | −₹2,88,028 / −₹3,30,976 | ₹0 / −₹887 |
+| **Combined** | **−₹2,31,187 / −₹2,53,700** | **+₹44,298 / +₹84,620** |
+| Stuck positions | 3 / 3 | 0 / 1 |
+| Capital frozen in open | ₹14,88,655 / ₹14,07,488 | ₹0 / ₹1,99,714 |
+
+**Read the combined row, not the realized row.** This strategy has no
+stop-loss, so a losing position never closes — it stays open, averages down,
+and never reaches the realized column at all. On realized P&L alone the
+52w_low trigger looks 100%-win-rate profitable. Marked to market it is down
+roughly ₹2.4 lakh, with ~95% of the capital cap frozen indefinitely in three
+positions that never reached +2% (ITC −₹2,21,467 on Nifty 50; KPITTECH
+−₹1,87,981 on Nifty 200).
+
+The rsi_dip trigger (RSI(14) ≤ 30 while price is above its 200-day EMA) does
+what it was designed to do: it fires far less often (23 vs 95 distinct symbols
+on Nifty 200) and its uptrend filter keeps it out of the structural decliners
+that the 52w-low trigger kept catching. It also leaves capital free — one open
+position instead of three, ₹2 lakh tied up instead of ₹14 lakh.
+
+### The result depended on a modeling fix, not just the trigger
+
+An earlier version of this comparison had rsi_dip at −₹45,144 on Nifty 200,
+driven entirely by one trade (GODFRYPHLP, −₹99,670). That loss was an
+artifact. The engine only saw daily closes, so a trailing stop that was
+breached intraday was booked at the day's close: on 2026-02-23 a stop at
+~₹2,485 was filled at ₹2,213 — about ₹1,11,000 of phantom loss on 408 shares,
+enough to flip that arm's sign. A trailing stop is a resting order and fills
+at the stop level (or at the open on a gap-down). `SwingEngine` now models
+that (`stop_fill_at_level`, on by default via `src.swing_backtest.run`).
+
+After the fix, no single trade carries either result — the biggest single win
+is ₹11,428 out of ₹85,506 across 16 trades — which is a meaningfully stronger
+basis than the outlier-driven numbers elsewhere in this document.
+
+### What this does NOT establish
+
+- **Survivorship bias.** The universes are current index snapshots, so these
+  are by construction the stocks that did not collapse over the window.
+- **One window, one market regime.** 252 trading days ending 2026-09-07.
+- **Entry timing is not symmetric between the arms.** 52w_low's signal uses
+  the trigger day's own Low, so it is known intraday and filling at that day's
+  close is realistic. rsi_dip's signal uses only data strictly before the
+  trigger day, so it is known at the previous close — filling at the trigger
+  day's close hands it an extra day of drift its signal never asked for.
+  Entering at that day's open would be the realistic execution. Which way this
+  biases the result is not known, and it is not negligible.
+- **Fills are still optimistic.** No slippage past the stop level in a fast
+  market; entries and averaging legs fill at the daily close; MTF interest is
+  not modeled, so anything held on margin does worse than shown.
+- **rsi_dip has not been shown to be profitable in absolute terms** — only to
+  be much better than 52w_low on the same data. 16 closed trades is a small
+  sample, and the open-ended averaging risk that ruined 52w_low here is still
+  present in rsi_dip; it simply did not trigger in this window.
+
 ---
 
 ## Porting to another broker (e.g. Groww)
