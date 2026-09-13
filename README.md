@@ -74,3 +74,26 @@ added later enters at whatever the price is right then (using the day's
 open wouldn't make sense for a symbol you only decided on at 10 AM). No
 new entries are taken after 2:30 PM, since there's not enough of the day
 left for the strategy to do anything with a fresh position.
+
+## Depth scanner (live alerts, no picks needed)
+
+```bash
+python3 -m src.auth              # re-authenticate (daily)
+python3 scripts/run_depth_scanner.py
+```
+
+Polls `kite.quote()` for the Nifty 200 universe (`src/screener.py`'s list)
+every 10s during market hours and sends a Telegram alert whenever a
+symbol's visible top-5 order book skews >= 85% to one side (buy or sell),
+with a minimum total book size so thin/illiquid names don't trigger on
+noise. Same read as the market-depth check behind the GRANULESIND trades
+on 2026-09-11 — automated instead of eyeballed. Read-only: it only calls
+`kite.quote()`, never places an order. Each alert re-fires at most once
+every 15 minutes per symbol+side while it stays past threshold.
+
+Depth imbalance alone is noisy — the book can be pulled or refreshed
+within seconds. Treat an alert as "go check the chart" (price already
+breaking a level, a real volume spike) before entering, not as a signal
+to trade on its own. Requires `TELEGRAM_BOT_TOKEN`/`TELEGRAM_CHAT_ID` in
+`.env` (see `src/telegram_notify.py`); without them it just prints
+alerts to the console.
