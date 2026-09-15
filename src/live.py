@@ -43,6 +43,21 @@ MARKET_OPEN = time(9, 15)
 MARKET_CLOSE = time(15, 30)
 POLL_INTERVAL_SECONDS = 15
 LATE_ENTRY_CUTOFF = time(14, 30)
+# NSE's revised pre-open session, effective 2026-09-07: Phase I (9:00-9:05) allows
+# market and limit orders, Phase II (9:05-9:10) limit orders only, order matching
+# 9:10-9:12, buffer to 9:15. Our orders are always protected LIMIT orders (see
+# orders.place_market_order), so they're valid in both phases -- only the timing
+# changes. PREOPEN_ENTRY_START is when the main loop starts attempting entries
+# instead of waiting for MARKET_OPEN. PREOPEN_ORDER_CUTOFF stops placing NEW
+# pre-open orders with enough buffer before matching begins that a late arrival
+# doesn't queue right as the window closes.
+PREOPEN_ENTRY_START = time(9, 0)
+PREOPEN_ORDER_CUTOFF = time(9, 7)
+# Short on purpose: by MARKET_OPEN a pre-open order should already be terminal
+# (matched, or auto-cancelled by the exchange if unmatched), so this just confirms
+# the outcome rather than waiting one out -- unlike orders.FILL_TIMEOUT_SECONDS (30s),
+# which is sized for a regular-session order expected to fill almost immediately.
+PREOPEN_RESOLUTION_TIMEOUT_SECONDS = 10
 # The day's official open is only a realistic, fillable reference price for a
 # real order if we're actually placing it close to when the market opened --
 # not "was this symbol in the plan file when the script started," since the
@@ -666,6 +681,13 @@ def run_live(
     # engine's qty is fine for its own P&L bookkeeping; real order quantities
     # must come from here.
     real_qty: dict[str, int] = {}
+    # Pre-open orders placed during PREOPEN_ENTRY_START..PREOPEN_ORDER_CUTOFF, awaiting
+    # the exchange's call-auction match -- NOT run through wait_for_fill (which would
+    # time out and cancel long before matching happens at 9:10-9:12). Resolved once
+    # MARKET_OPEN arrives; see the resolution pass in the main loop below. A symbol
+    # stays out of entered_today while pending, so an unmatched pre-open order still
+    # falls through to a normal entry attempt at 9:15.
+    pending_preopen: dict[str, dict] = {}
 
     engine.daily_pnl = _fetch_realized_pnl_today(kite)
     logger.event("daily_pnl_seeded", daily_pnl=engine.daily_pnl)
@@ -762,17 +784,17 @@ def run_live(
             if should_stop is not None and not stopping and should_stop():
                 stopping = True
                 logger.event("stop_requested")
-            if now < MARKET_OPEN:
+            if now < PREOPEN_ENTRY_START:
                 if stopping:
                     # Nothing can be open yet (the market hasn't opened, and any
                     # position reconciled from an earlier run today would imply
                     # it had), so there is nothing to square off -- just end.
                     # Without this the stop flag would be set but unreachable:
                     # the square-off and break checks both live below this
-                    # `continue`, so the session would sleep here until 9:15.
+                    # `continue`, so the session would sleep here until 9:00.
                     print("Stop requested before market open. Ending session; no orders placed.")
                     break
-                time_module.sleep(min(poll_interval, 30))
+                time_module.sleep(min(poll_interval, 15))
                 continue
             if now >= MARKET_CLOSE:
                 print("Market closed. Ending live session.")
@@ -812,6 +834,43 @@ def run_live(
 
             _detect_manual_closes(kite, engine, real_qty, logger)
 
+            # Resolve pending pre-open orders once the buffer period ends and regular
+            # trading begins -- by MARKET_OPEN the exchange's call auction (matching
+            # 9:10-9:12) has already run its course, so these should already be
+            # terminal; a short wait_for_fill just confirms that rather than waiting
+            # out a real fill. A symbol that didn't match stays out of entered_today,
+            # so the loop below attempts a normal entry for it instead.
+            if now >= MARKET_OPEN and pending_preopen:
+                for symbol, pending in list(pending_preopen.items()):
+                    result = orders.wait_for_fill(kite, pending["order_id"], timeout_seconds=PREOPEN_RESOLUTION_TIMEOUT_SECONDS)
+                    logger.event(
+                        "preopen_order_result",
+                        symbol=symbol,
+                        order_id=pending["order_id"],
+                        **{k: v for k, v in result.items() if k != "raw"},
+                    )
+                    del pending_preopen[symbol]
+                    if result["status"] == "COMPLETE" and result["average_price"]:
+                        filled_qty = result["filled_quantity"] or pending["quantity"]
+                        engine.enter(
+                            symbol,
+                            result["average_price"],
+                            pending["direction"],
+                            _now(),
+                            atr=symbol_atr.get(symbol),
+                            quantity=filled_qty,
+                        )
+                        real_qty[symbol] = filled_qty
+                        entered_today.add(symbol)
+                        logger.event(
+                            "entry",
+                            symbol=symbol,
+                            direction=pending["direction"],
+                            price=result["average_price"],
+                            quantity=filled_qty,
+                            venue="preopen",
+                        )
+
             current_prices: dict[str, float] = {}
             for symbol in watch_symbols:
                 quote = quotes.get(f"NSE:{symbol}")
@@ -823,6 +882,7 @@ def run_live(
                     not stopping
                     and symbol in plan
                     and symbol not in entered_today
+                    and symbol not in pending_preopen
                     and now < LATE_ENTRY_CUTOFF
                     and engine.can_enter(symbol)
                 ):
@@ -843,17 +903,60 @@ def run_live(
                         continue
 
                     transaction_type = "BUY" if direction == "long" else "SELL"
-                    result = place_and_confirm(symbol, transaction_type, quantity, ref_price, tag="entry", is_entry=True)
-                    entered_today.add(symbol)  # one entry attempt per symbol per day, win or lose
-                    if result["status"] == "COMPLETE" and result["average_price"]:
-                        filled_qty = result["filled_quantity"] or quantity
-                        engine.enter(
-                            symbol, result["average_price"], direction, _now(), atr=symbol_atr.get(symbol), quantity=filled_qty
-                        )
-                        real_qty[symbol] = filled_qty
-                        logger.event("entry", symbol=symbol, direction=direction, price=result["average_price"], quantity=filled_qty)
-                    else:
-                        logger.event("entry_failed", symbol=symbol, direction=direction, quantity=quantity, result=result)
+
+                    if PREOPEN_ENTRY_START <= now < PREOPEN_ORDER_CUTOFF:
+                        # NSE's pre-open window: place the protected-limit order and let
+                        # it queue for the call auction. Deliberately NOT run through
+                        # place_and_confirm/wait_for_fill -- that would time out after
+                        # FILL_TIMEOUT_SECONDS (30s) and cancel the order long before
+                        # matching happens at 9:10-9:12. Resolved in the pass above once
+                        # MARKET_OPEN arrives.
+                        try:
+                            order_id = orders.place_market_order(
+                                kite, symbol, transaction_type, quantity, ref_price, tag="preopen_entry"
+                            )
+                        except orders.OrderRejected as exc:
+                            logger.event(
+                                "preopen_order_rejected",
+                                symbol=symbol,
+                                transaction_type=transaction_type,
+                                quantity=quantity,
+                                error=str(exc),
+                            )
+                            # Not added to entered_today -- falls through to a normal
+                            # 9:15 entry attempt instead.
+                        except orders.OrderPlacementAmbiguous as exc:
+                            logger.critical(
+                                f"{symbol} pre-open {transaction_type} order placement is in an UNKNOWN state -- {exc}",
+                                symbol=symbol,
+                                transaction_type=transaction_type,
+                                quantity=quantity,
+                            )
+                            engine.halted = True
+                        else:
+                            logger.event(
+                                "preopen_order_placed",
+                                symbol=symbol,
+                                transaction_type=transaction_type,
+                                quantity=quantity,
+                                order_id=order_id,
+                            )
+                            pending_preopen[symbol] = {"order_id": order_id, "direction": direction, "quantity": quantity}
+                    elif now >= MARKET_OPEN:
+                        result = place_and_confirm(symbol, transaction_type, quantity, ref_price, tag="entry", is_entry=True)
+                        entered_today.add(symbol)  # one entry attempt per symbol per day, win or lose
+                        if result["status"] == "COMPLETE" and result["average_price"]:
+                            filled_qty = result["filled_quantity"] or quantity
+                            engine.enter(
+                                symbol, result["average_price"], direction, _now(), atr=symbol_atr.get(symbol), quantity=filled_qty
+                            )
+                            real_qty[symbol] = filled_qty
+                            logger.event("entry", symbol=symbol, direction=direction, price=result["average_price"], quantity=filled_qty)
+                        else:
+                            logger.event("entry_failed", symbol=symbol, direction=direction, quantity=quantity, result=result)
+                    # else: PREOPEN_ORDER_CUTOFF <= now < MARKET_OPEN -- the pre-open
+                    # window has closed and auction matching is in progress; wait for
+                    # the resolution pass above once MARKET_OPEN arrives.
 
             # Log the exact prices this poll is about to act on, for open positions
             # specifically -- without this, reconstructing what actually happened
