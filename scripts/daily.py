@@ -1,13 +1,17 @@
 """One command for the whole morning routine: pull latest code, log into
-Kite, take today's picks in one line, then start live or shadow trading.
+Kite, take today's picks, then go straight to live trading.
 
 This does not remove any safety gate -- LIVE_TRADING_ENABLED is still set
 explicitly (and turned back off after the run), and run_live.py still
 requires a typed CONFIRM against the real sizing before placing any order.
-This script only collapses the boilerplate around those gates -- git pull,
-nano-editing the plan file, nano-editing .env -- into one guided prompt.
+This script only collapses the boilerplate around that gate -- git pull,
+nano-editing the plan file, nano-editing .env -- into one command.
 
-Run it from the project root:  .venv/bin/python3 scripts/daily.py
+Pass today's picks as a single quoted argument:
+
+    .venv/bin/python3 scripts/daily.py "RVNL long 40%, MAZDOCK short 40%, GRANULES long 20%"
+
+or run it with no argument and it will ask for them instead.
 """
 
 import json
@@ -20,7 +24,6 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from src import auth  # noqa: E402
 from src.live import TODAYS_STOCKS_FILE as LIVE_PLAN_FILE  # noqa: E402
-from src.shadow import TODAYS_STOCKS_FILE as SHADOW_PLAN_FILE  # noqa: E402
 from src.telegram_control import _describe_entry, parse_picks, validate_plan_consistency  # noqa: E402
 
 ENV_FILE = PROJECT_ROOT / ".env"
@@ -41,7 +44,7 @@ def set_live_trading_enabled(value: bool) -> None:
 
 def main() -> None:
     print("=" * 70)
-    print("DAILY STARTUP")
+    print("DAILY STARTUP -- LIVE TRADING")
     print("=" * 70)
 
     print("\n1. Pulling latest code...")
@@ -53,10 +56,14 @@ def main() -> None:
     else:
         auth.login(paste_only=True)
 
-    print("\n3. Enter today's picks, e.g.:")
-    print("   RVNL long 40%, MAZDOCK short 40%, GRANULES long 20%")
-    print("   (or without %, e.g. 'RVNL long, MAZDOCK short' for an equal split)")
-    text = input("> ")
+    text = " ".join(sys.argv[1:]).strip()
+    if not text:
+        print("\n3. Enter today's picks, e.g.:")
+        print("   RVNL long 40%, MAZDOCK short 40%, GRANULES long 20%")
+        text = input("> ")
+    else:
+        print(f"\n3. Today's picks: {text}")
+
     try:
         plan = parse_picks(text)
         validate_plan_consistency(plan)
@@ -69,24 +76,15 @@ def main() -> None:
     for sym, entry in plan.items():
         print(f"  {sym:12s} {_describe_entry(entry)}")
 
-    mode = input("\n4. Type LIVE for real money, SHADOW for paper trading, anything else to cancel: ").strip().upper()
-
-    if mode == "LIVE":
-        LIVE_PLAN_FILE.write_text(json.dumps(plan, indent=2))
-        set_live_trading_enabled(True)
-        print(f"\nPlan written to {LIVE_PLAN_FILE}. LIVE_TRADING_ENABLED set to true.")
-        print("Starting scripts/run_live.py -- you'll still be asked to type CONFIRM before anything real trades.\n")
-        try:
-            subprocess.run([sys.executable, str(PROJECT_ROOT / "scripts" / "run_live.py")], cwd=PROJECT_ROOT)
-        finally:
-            set_live_trading_enabled(False)
-            print("\nLIVE_TRADING_ENABLED turned back off.")
-    elif mode == "SHADOW":
-        SHADOW_PLAN_FILE.write_text(json.dumps(plan, indent=2))
-        print(f"\nPlan written to {SHADOW_PLAN_FILE}. Starting scripts/run_shadow.py (paper trading, no real orders)...\n")
-        subprocess.run([sys.executable, str(PROJECT_ROOT / "scripts" / "run_shadow.py")], cwd=PROJECT_ROOT)
-    else:
-        print("Cancelled. No plan file written, nothing started.")
+    LIVE_PLAN_FILE.write_text(json.dumps(plan, indent=2))
+    set_live_trading_enabled(True)
+    print(f"\nPlan written to {LIVE_PLAN_FILE}. LIVE_TRADING_ENABLED set to true.")
+    print("Starting scripts/run_live.py -- you'll still be asked to type CONFIRM before anything real trades.\n")
+    try:
+        subprocess.run([sys.executable, str(PROJECT_ROOT / "scripts" / "run_live.py")], cwd=PROJECT_ROOT)
+    finally:
+        set_live_trading_enabled(False)
+        print("\nLIVE_TRADING_ENABLED turned back off.")
 
 
 if __name__ == "__main__":
