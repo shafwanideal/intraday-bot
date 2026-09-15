@@ -165,3 +165,37 @@ added later enters at whatever the price is right then (using the day's
 open wouldn't make sense for a symbol you only decided on at 10 AM). No
 new entries are taken after 2:30 PM, since there's not enough of the day
 left for the strategy to do anything with a fresh position.
+
+## Depth scanner (live alerts, no picks needed)
+
+```bash
+python3 -m src.auth              # re-authenticate (daily)
+python3 scripts/run_depth_scanner.py
+```
+
+Polls `kite.quote()` for the Nifty 200 universe (`src/screener.py`'s list)
+every 10s during market hours. A symbol only gets a Telegram alert once
+**all three** agree, the same combination that was actually present
+before GRANULESIND's two up-legs on 2026-09-11:
+
+1. **Depth** — visible top-5 order book skews >= 85% to one side (buy or
+   sell), with a minimum total book size so thin/illiquid names don't
+   trigger on noise.
+2. **Price** — last traded price is at/within 0.15% of today's high (for
+   a buy signal) or low (for a sell signal) — i.e. actually breaking out
+   right now, not just up or down on the day.
+3. **Volume** — trading pace since the last poll is running at least 3x
+   the stock's own average pace since today's open (self-normalizing per
+   stock; skipped for the first 5 minutes after open, since the day's
+   average pace isn't meaningful yet).
+
+Depth-only candidates that don't clear price/volume are still printed to
+the console each poll (for visibility) but don't page you. Read-only: it
+only calls `kite.quote()`, never places an order. Each alert re-fires at
+most once every 15 minutes per symbol+side while it stays confirmed.
+
+This is a stronger filter than depth alone, not a guarantee — even a
+confirmed alert is "go look at the chart," not an auto-entry signal.
+Requires `TELEGRAM_BOT_TOKEN`/`TELEGRAM_CHAT_ID` in `.env` (see
+`src/telegram_notify.py`); without them it just prints alerts to the
+console.
