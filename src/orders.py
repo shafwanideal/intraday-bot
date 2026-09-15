@@ -1,24 +1,20 @@
 import time as time_module
-from decimal import ROUND_HALF_UP, Decimal
 
 import requests
 from kiteconnect import KiteConnect
 from kiteconnect.exceptions import KiteException
 
-from . import kite_data
-
 FILL_TIMEOUT_SECONDS = 30
 FILL_POLL_INTERVAL_SECONDS = 1.0
 TERMINAL_STATUSES = {"COMPLETE", "REJECTED", "CANCELLED"}
 
-# Kite's API rejects plain MARKET orders outright ("Market orders without
-# market protection are not allowed via API"). The standard workaround --
-# and arguably better practice anyway, since it caps worst-case slippage --
-# is a LIMIT order priced a small buffer beyond the reference price, wide
-# enough to fill immediately against the current bid/ask like a market
-# order would, but capped so a freak price spike can't fill at an
-# arbitrarily bad price.
-LIMIT_PRICE_BUFFER_PCT = 0.005  # 0.5%
+# SEBI's retail-algo rules (2026) require a non-zero market_protection value on
+# every MARKET (and SL-M) order placed via the API -- an unprotected one
+# (market_protection unset or 0) is rejected outright. -1 means AUTO: the
+# exchange/broker applies a dynamic protection band off the current LTP,
+# rather than us hand-computing a buffered LIMIT price ourselves (the previous
+# approach here, before this became a real MARKET order).
+MARKET_PROTECTION_AUTO = -1
 
 # A network-level error (timeout, connection reset) never reached Kite's
 # servers in any confirmable way -- these are the genuinely ambiguous ones.
@@ -31,26 +27,6 @@ LIMIT_PRICE_BUFFER_PCT = 0.005  # 0.5%
 # stock-specific rejection that has nothing to do with the other symbols.
 AMBIGUOUS_EXCEPTIONS = (requests.exceptions.RequestException,)
 PLACEMENT_EXCEPTIONS = (KiteException, requests.exceptions.RequestException)  # used where the distinction doesn't matter (polling reads)
-
-
-def _protected_limit_price(reference_price: float, transaction_type: str, tick_size: float) -> float:
-    """Kite rejects any LIMIT price that isn't an exact multiple of the
-    instrument's tick size (commonly 0.05, but not guaranteed) -- round to
-    the nearest valid tick after applying the buffer.
-
-    Uses Decimal rather than plain float arithmetic: binary floats can't
-    exactly represent values like 906.3, so a naive float round-to-tick can
-    produce a price that's off by a tiny fraction of a paisa -- harmless to
-    a human eye, but real money, and not worth risking a rejection (or
-    worse, a silently-accepted-but-wrong price) over avoidable imprecision.
-    """
-    buffer = Decimal(str(LIMIT_PRICE_BUFFER_PCT))
-    multiplier = Decimal("1") + (buffer if transaction_type == "BUY" else -buffer)
-    ref = Decimal(str(reference_price))
-    tick = Decimal(str(tick_size))
-    buffered = ref * multiplier
-    ticks = (buffered / tick).to_integral_value(rounding=ROUND_HALF_UP)
-    return float(ticks * tick)
 
 
 class OrderRejected(Exception):
@@ -74,23 +50,26 @@ class OrderPlacementAmbiguous(Exception):
 def place_market_order(
     kite: KiteConnect, symbol: str, transaction_type: str, quantity: int, reference_price: float, tag: str | None = None
 ) -> str:
-    """Place a real MIS (intraday) order on NSE that behaves like a market
-    order -- fills immediately at the best available price -- but is
-    actually a LIMIT order priced LIMIT_PRICE_BUFFER_PCT beyond
-    `reference_price` (the current LTP or similar), since Kite's API
-    rejects plain market orders outright. Returns the order_id.
+    """Place a real MIS (intraday) MARKET order on NSE -- fills immediately
+    at the best available price, protected by Kite's own AUTO market
+    protection band rather than a hand-computed LIMIT price (the previous
+    approach here). `reference_price` isn't sent to Kite at all -- a MARKET
+    order carries no price -- it's kept in the signature because callers
+    already compute it for sizing/logging. Returns the order_id.
 
     transaction_type must be "BUY" or "SELL". A returned order_id does NOT
     mean the order filled, only that Kite accepted the request; use
     wait_for_fill() to confirm the actual outcome.
 
     Raises OrderRejected if Kite cleanly rejected the request (a definite,
-    known outcome -- e.g. MIS blocked for this instrument) -- caller should
-    just skip this symbol, not halt everything. Raises
-    OrderPlacementAmbiguous only for a genuine network-level failure, where
-    it's unclear whether the request reached Kite at all; does NOT retry in
-    that case (checks kite.orders() for a possible match first, since
-    blindly retrying risks a duplicate real order).
+    known outcome -- e.g. MIS blocked for this instrument, or a MARKET order
+    placed during NSE's pre-open Phase II 9:05-9:10, which allows only LIMIT
+    orders -- see live.py's PREOPEN_ORDER_CUTOFF) -- caller should just skip
+    this symbol, not halt everything. Raises OrderPlacementAmbiguous only for
+    a genuine network-level failure, where it's unclear whether the request
+    reached Kite at all; does NOT retry in that case (checks kite.orders()
+    for a possible match first, since blindly retrying risks a duplicate real
+    order).
 
     Raises ValueError up front if `tag` is over Kite's 20-char limit, rather
     than letting Kite reject the order -- found for real on 2026-09-02, where
@@ -101,8 +80,6 @@ def place_market_order(
     """
     if tag is not None and len(tag) > 20:
         raise ValueError(f"Order tag {tag!r} is {len(tag)} chars, over Kite's 20-char limit -- Kite would reject this order.")
-    tick_size = kite_data.get_tick_size(kite, symbol)
-    limit_price = _protected_limit_price(reference_price, transaction_type, tick_size)
     try:
         return kite.place_order(
             variety=kite.VARIETY_REGULAR,
@@ -111,8 +88,8 @@ def place_market_order(
             transaction_type=transaction_type,
             quantity=quantity,
             product=kite.PRODUCT_MIS,
-            order_type=kite.ORDER_TYPE_LIMIT,
-            price=limit_price,
+            order_type=kite.ORDER_TYPE_MARKET,
+            market_protection=MARKET_PROTECTION_AUTO,
             tag=tag,
         )
     except KiteException as exc:

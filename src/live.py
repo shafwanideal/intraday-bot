@@ -44,15 +44,15 @@ MARKET_CLOSE = time(15, 30)
 POLL_INTERVAL_SECONDS = 15
 LATE_ENTRY_CUTOFF = time(14, 30)
 # NSE's revised pre-open session, effective 2026-09-07: Phase I (9:00-9:05) allows
-# market and limit orders, Phase II (9:05-9:10) limit orders only, order matching
-# 9:10-9:12, buffer to 9:15. Our orders are always protected LIMIT orders (see
-# orders.place_market_order), so they're valid in both phases -- only the timing
-# changes. PREOPEN_ENTRY_START is when the main loop starts attempting entries
-# instead of waiting for MARKET_OPEN. PREOPEN_ORDER_CUTOFF stops placing NEW
-# pre-open orders with enough buffer before matching begins that a late arrival
-# doesn't queue right as the window closes.
+# market AND limit orders, Phase II (9:05-9:10) allows LIMIT ORDERS ONLY --
+# market orders are rejected outright. orders.place_market_order places a real
+# MARKET order (see MARKET_PROTECTION_AUTO there), so PREOPEN_ORDER_CUTOFF is
+# pinned to the Phase I boundary (9:05), not the window's actual 9:10 close --
+# placing after 9:05 would just get rejected as a MARKET order. PREOPEN_ENTRY_START
+# is when the main loop starts attempting entries instead of waiting for
+# MARKET_OPEN.
 PREOPEN_ENTRY_START = time(9, 0)
-PREOPEN_ORDER_CUTOFF = time(9, 7)
+PREOPEN_ORDER_CUTOFF = time(9, 5)
 # Short on purpose: by MARKET_OPEN a pre-open order should already be terminal
 # (matched, or auto-cancelled by the exchange if unmatched), so this just confirms
 # the outcome rather than waiting one out -- unlike orders.FILL_TIMEOUT_SECONDS (30s),
@@ -905,12 +905,12 @@ def run_live(
                     transaction_type = "BUY" if direction == "long" else "SELL"
 
                     if PREOPEN_ENTRY_START <= now < PREOPEN_ORDER_CUTOFF:
-                        # NSE's pre-open window: place the protected-limit order and let
-                        # it queue for the call auction. Deliberately NOT run through
-                        # place_and_confirm/wait_for_fill -- that would time out after
-                        # FILL_TIMEOUT_SECONDS (30s) and cancel the order long before
-                        # matching happens at 9:10-9:12. Resolved in the pass above once
-                        # MARKET_OPEN arrives.
+                        # NSE's pre-open Phase I (market orders allowed): place the
+                        # MARKET order and let it queue for the call auction.
+                        # Deliberately NOT run through place_and_confirm/wait_for_fill --
+                        # that would time out after FILL_TIMEOUT_SECONDS (30s) and cancel
+                        # the order long before matching happens at 9:10-9:12. Resolved
+                        # in the pass above once MARKET_OPEN arrives.
                         try:
                             order_id = orders.place_market_order(
                                 kite, symbol, transaction_type, quantity, ref_price, tag="preopen_entry"
