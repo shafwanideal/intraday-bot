@@ -178,11 +178,25 @@ def run_backtest(
                     if symbol not in day_bars or t not in day_bars[symbol].index:
                         continue
                     price = day_bars[symbol].loc[t, "Open"]
-                    direction, pct = parse_plan_entry(day_directions.get(symbol, "long"))
-                    # pct given -> size this position at exactly pct% of margin_capital
-                    # (leveraged), overriding the engine's own equal-split exposure_per_unit.
-                    # None -> unchanged original behavior (equal split across total_units).
-                    quantity = (pct / 100.0 * margin_capital * leverage) / price if pct is not None else None
+                    entry_spec = day_directions.get(symbol, "long")
+                    # "rupees" and "qty" are absolute sizing modes for one-off backtest
+                    # diagnostics (e.g. "put exactly Rs 25,000 into this stock" or "size
+                    # it to match this many real shares") -- independent of margin_capital
+                    # and leverage, and not part of the pct all-or-nothing/sum<=100% rule
+                    # (validate_day_plan_allocations only looks at "pct"). Checked before
+                    # falling back to parse_plan_entry's pct/equal-split handling.
+                    if isinstance(entry_spec, dict) and entry_spec.get("rupees") is not None:
+                        direction = entry_spec["direction"]
+                        quantity = float(entry_spec["rupees"]) / price
+                    elif isinstance(entry_spec, dict) and entry_spec.get("qty") is not None:
+                        direction = entry_spec["direction"]
+                        quantity = float(entry_spec["qty"])
+                    else:
+                        direction, pct = parse_plan_entry(entry_spec)
+                        # pct given -> size this position at exactly pct% of margin_capital
+                        # (leveraged), overriding the engine's own equal-split exposure_per_unit.
+                        # None -> unchanged original behavior (equal split across total_units).
+                        quantity = (pct / 100.0 * margin_capital * leverage) / price if pct is not None else None
                     if engine.enter(symbol, price, direction, t, atr=symbol_atr.get(symbol), quantity=quantity):
                         last_known_price[symbol] = price
 
