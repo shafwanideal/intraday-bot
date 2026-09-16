@@ -83,6 +83,75 @@ def check_bounce(
     }
 
 
+def find_bounce_events(
+    weekly_df: pd.DataFrame,
+    lookback_weeks: int = DEFAULT_LOOKBACK_WEEKS,
+    touch_tolerance: float = DEFAULT_TOUCH_TOLERANCE,
+    min_recovery: float = DEFAULT_MIN_RECOVERY,
+) -> list[dict]:
+    """Every historical bounce off THIS SAME rolling support definition, across
+    the whole weekly series (not just the latest week) -- i.e. how many times
+    has this support level actually held.
+
+    A multi-week consolidation sitting right at support (which can satisfy
+    check_bounce on several consecutive weeks in a row) is collapsed into ONE
+    event -- otherwise one basing structure would inflate the count instead
+    of one real test-and-reclaim of the floor. The strongest week (highest
+    recovery_pct) in each consecutive run is kept as that event's record.
+    """
+    qualifying = []
+    for idx in range(lookback_weeks, len(weekly_df)):
+        bounce = check_bounce(weekly_df, idx, lookback_weeks, touch_tolerance, min_recovery)
+        if bounce:
+            bounce["idx"] = idx
+            qualifying.append(bounce)
+
+    events = []
+    run: list[dict] = []
+    for bounce in qualifying:
+        if run and bounce["idx"] == run[-1]["idx"] + 1:
+            run.append(bounce)
+        else:
+            if run:
+                events.append(max(run, key=lambda r: r["recovery_pct"]))
+            run = [bounce]
+    if run:
+        events.append(max(run, key=lambda r: r["recovery_pct"]))
+    for event in events:
+        del event["idx"]
+    return events
+
+
+def screen_bounce_history(
+    daily_data: dict[str, pd.DataFrame],
+    lookback_weeks: int = DEFAULT_LOOKBACK_WEEKS,
+    touch_tolerance: float = DEFAULT_TOUCH_TOLERANCE,
+    min_recovery: float = DEFAULT_MIN_RECOVERY,
+) -> list[dict]:
+    """Per symbol, how many times (see find_bounce_events) it has bounced off
+    its own rolling weekly support across all the history it was given, plus
+    the events themselves. Only includes symbols with at least one such event.
+    Sorted by bounce count descending, most-proven support first.
+    """
+    results = []
+    for symbol, daily_df in daily_data.items():
+        weekly = weekly_ohlc(daily_df)
+        if len(weekly) < lookback_weeks + 1:
+            continue
+        events = find_bounce_events(weekly, lookback_weeks, touch_tolerance, min_recovery)
+        if events:
+            results.append(
+                {
+                    "symbol": symbol,
+                    "count": len(events),
+                    "events": events,
+                    "weeks_of_data": len(weekly),
+                }
+            )
+    results.sort(key=lambda r: r["count"], reverse=True)
+    return results
+
+
 def screen_weekly_support_bounces(
     daily_data: dict[str, pd.DataFrame],
     lookback_weeks: int = DEFAULT_LOOKBACK_WEEKS,
