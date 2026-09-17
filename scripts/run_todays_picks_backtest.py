@@ -45,11 +45,14 @@ CAVEATS (read before acting on these numbers):
   atr_multiplier docs for exactly how the trail distance is computed.
 - Grid trigger levels are evaluated on each 5-min bar's CLOSE, not tick by
   tick.
-- No leverage (1x, changed from 5x on 2026-09-13) -- exposure is the literal
-  cash % of margin_capital you specify, not Zerodha's real MIS margin
-  multiplier. A re-run of this same plan after that date will show smaller
-  P&L than an earlier run under the old 5x default -- that's the leverage
-  change, not a code regression.
+- 5x leverage (reverted 2026-09-17, was briefly 1x from 2026-09-13) -- exposure
+  is pct% of margin_capital times this leverage constant, not Zerodha's real
+  per-stock MIS margin multiplier (which varies and isn't guaranteed to be
+  exactly 5x). Re-running a plan dated between 2026-09-13 and 2026-09-17 will
+  now show ~5x larger P&L than it did back then -- that's the leverage
+  default changing, not a code regression. The daily loss cap and portfolio
+  profit floor are unaffected by this -- both are a % of raw margin_capital,
+  not leveraged exposure, so they still cap the same rupee risk regardless.
 - Transaction costs ARE modeled (brokerage, STT, exchange charges, SEBI
   charges, stamp duty, GST) on the leveraged order value. Slippage is NOT
   modeled.

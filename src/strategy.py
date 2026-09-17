@@ -5,15 +5,15 @@ MARGIN_CAPITAL = 50_000  # DEFAULT/fallback only -- live.py and shadow.py size o
 # account's actual available cash each day instead; this is what backtests use.
 TOTAL_UNITS = 4
 MARGIN_PER_UNIT = MARGIN_CAPITAL / TOTAL_UNITS  # 12,500
-LEVERAGE = 1  # changed 2026-09-13 from 5x: the layered-trailing-stop/portfolio-floor
-# strategy spec explicitly calls for no leverage -- exposure is the literal cash %
-# allocated per stock, not Zerodha's real MIS margin multiplier. Deliberate, not an
-# oversight: the spec's own sizing section names the 5x default and overrides it.
-# Old value (5x, Zerodha MIS intraday leverage on equity; varies per stock in
-# reality) is still what run_daily_plan_backtest.py's historical dated entries were
-# actually traded/backtested under -- changing this constant changes their
-# interpretation retroactively if re-run, which is a known tradeoff of a shared
-# global default rather than a per-strategy-version setting.
+LEVERAGE = 5  # reverted 2026-09-17 (explicit user request) from the 1x set on 2026-09-13.
+# The daily loss cap and portfolio profit floor (compute_daily_loss_cap,
+# compute_portfolio_profit_lock_trigger) are both a % of raw margin_capital, NOT of
+# leveraged exposure -- deliberately unchanged by this revert. That's a fixed rupee
+# risk budget ("how much am I willing to lose today"), independent of how much
+# leverage is used to get there -- but it does mean that budget now burns through
+# with roughly 1/5th the price movement it used to, since positions are 5x larger
+# for the same % allocation. Zerodha's real per-stock MIS multiplier varies and
+# isn't guaranteed to be exactly 5x regardless of what this constant says.
 MAX_CONCURRENT_POSITIONS = 3  # DEFAULT/fallback -- this is what backtest.py uses.
 MAX_STOCKS_PER_DAY = 20  # sanity ceiling to catch a typo/fat-fingered plan file, not a real
 # business limit -- capital splits evenly across however many stocks are actually given, so
