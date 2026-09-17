@@ -53,11 +53,18 @@ LATE_ENTRY_CUTOFF = time(14, 30)
 # MARKET_OPEN.
 PREOPEN_ENTRY_START = time(9, 0)
 PREOPEN_ORDER_CUTOFF = time(9, 5)
-# Short on purpose: by MARKET_OPEN a pre-open order should already be terminal
-# (matched, or auto-cancelled by the exchange if unmatched), so this just confirms
-# the outcome rather than waiting one out -- unlike orders.FILL_TIMEOUT_SECONDS (30s),
-# which is sized for a regular-session order expected to fill almost immediately.
-PREOPEN_RESOLUTION_TIMEOUT_SECONDS = 10
+# Real data, 2026-09-16: checking right at MARKET_OPEN with only a 10s timeout
+# needlessly cancelled 4 genuinely-matched pre-open orders (TITAGARH, YESBANK,
+# PAYTM, SAATVIKGL) before Kite's own systems had caught up -- 3 of the 4 then
+# refilled fine as a fresh regular-session order a few seconds later, but
+# SAATVIKGL never got a follow-up at all. PREOPEN_RESOLUTION_START pushes the
+# check itself back half a minute so the exchange/broker have more real wall-clock
+# time to settle before we even ask; PREOPEN_RESOLUTION_TIMEOUT_SECONDS is now a
+# secondary safety margin on top of that, not the only buffer -- still much
+# shorter than orders.FILL_TIMEOUT_SECONDS (30s), which is sized for a
+# regular-session order expected to fill almost immediately, not a call auction.
+PREOPEN_RESOLUTION_START = time(9, 15, 30)
+PREOPEN_RESOLUTION_TIMEOUT_SECONDS = 15
 # The day's official open is only a realistic, fillable reference price for a
 # real order if we're actually placing it close to when the market opened --
 # not "was this symbol in the plan file when the script started," since the
@@ -834,13 +841,13 @@ def run_live(
 
             _detect_manual_closes(kite, engine, real_qty, logger)
 
-            # Resolve pending pre-open orders once the buffer period ends and regular
-            # trading begins -- by MARKET_OPEN the exchange's call auction (matching
-            # 9:10-9:12) has already run its course, so these should already be
-            # terminal; a short wait_for_fill just confirms that rather than waiting
-            # out a real fill. A symbol that didn't match stays out of entered_today,
-            # so the loop below attempts a normal entry for it instead.
-            if now >= MARKET_OPEN and pending_preopen:
+            # Resolve pending pre-open orders once PREOPEN_RESOLUTION_START arrives --
+            # deliberately later than MARKET_OPEN itself (see that constant's comment):
+            # checking too early cancelled genuinely-matched orders on 2026-09-16
+            # before Kite's systems had caught up. A symbol that still didn't match
+            # stays out of entered_today, so the loop below attempts a normal entry
+            # for it instead.
+            if now >= PREOPEN_RESOLUTION_START and pending_preopen:
                 for symbol, pending in list(pending_preopen.items()):
                     result = orders.wait_for_fill(kite, pending["order_id"], timeout_seconds=PREOPEN_RESOLUTION_TIMEOUT_SECONDS)
                     logger.event(
