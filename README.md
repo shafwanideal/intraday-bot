@@ -3,8 +3,12 @@
 Grid-averaging intraday strategy for Indian equities via Zerodha Kite Connect.
 See the project brief for strategy rules and build status.
 
-**Status**: auth, a real historical backtest, and shadow (paper) trading
-against live Kite data are working. Nothing here places real orders yet.
+**Status**: auth, a real historical backtest, shadow (paper) trading, and
+live order placement are working. Live trading is gated behind
+`LIVE_TRADING_ENABLED=true` plus a typed confirmation.
+
+Can be run entirely from a phone via the Telegram control bot -- see
+"Phone control" below and `deploy/README.md` for the Contabo VPS setup.
 
 ## Setup
 
@@ -25,7 +29,8 @@ toolchain installed.
 Kite access tokens expire daily, so this must be run once each trading morning:
 
 ```bash
-python3 -m src.auth
+python3 -m src.auth            # add --paste on a headless box to skip
+                               # the callback wait and paste the URL directly
 ```
 
 This prints a login URL, waits for you to paste back the redirect URL (or
@@ -34,11 +39,68 @@ access token and caches it in `.kite_session.json` (gitignored) for the rest
 of the day. Other modules should call `src.auth.get_kite()` to get an
 authenticated client — it reuses the cached token if still valid for today.
 
+That login needs a browser and someone at the keyboard, so it can't run in a
+headless or cloud session. For those, generate the token where you *can* log
+in (`python3 -m src.auth` prints `KITE_ACCESS_TOKEN=...` alongside caching it)
+and set it as an environment variable there:
+
+```bash
+export KITE_ACCESS_TOKEN=...   # today's token, from the login above
+export KITE_API_KEY=...        # KITE_API_SECRET is NOT needed for this path
+```
+
+`get_kite()` prefers that variable over both the cache and the login flow, and
+validates it up front so an expired one fails immediately with a clear message
+rather than mid-backtest. Kite kills tokens overnight, so it's a fresh value
+each trading day — and it's a live credential that can place orders, not just
+read data, so treat it like one.
+
+## Pre-flight check
+
+```bash
+.venv/bin/python3 scripts/preflight.py
+```
+
+Verifies the machine is ready to trade: Python version, packages, `.env` and
+its permissions, all four credentials, a live Telegram round-trip (it sends
+you a test message), today's Kite session, writable log directory, clock, and
+which trading mode the gate is in. Read-only apart from that test message --
+it places no orders. Exits 0 when ready, 1 with a list of what to fix.
+
+Run it after setup, and any morning something feels off.
+
+## Phone control (Telegram)
+
+Runs the whole trading day from Telegram, so a VPS can host it with no SSH
+session open:
+
+```bash
+python3 scripts/run_bot.py     # or under systemd -- see deploy/README.md
+```
+
+```
+/login          authenticate with Kite (once per trading day)
+RVNL long, MAZDOCK short       set today's plan
+/confirm  ->  CONFIRM          approve sizing and arm real trading
+/status         open positions and live P&L
+/add BSE long   add a stock to a running session
+/stop           square off everything now
+/shadow         paper-trade today's plan instead
+```
+
+This changes *where* the confirmation is typed, not whether one is required.
+`LIVE_TRADING_ENABLED=true` must still be set in `.env` on the server, and a
+human still approves the same sizing summary the terminal would have printed.
+The bot ignores messages from any chat other than `TELEGRAM_CHAT_ID`.
+
+Needs `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` in `.env`.
+
 ## Backtest
 
 ```bash
-python3 scripts/run_backtest.py             # generic sample-symbol backtest
+python3 scripts/run_backtest.py              # generic sample-symbol backtest
 python3 scripts/run_daily_plan_backtest.py   # backtest specific (date, symbol) picks you actually made
+python3 scripts/run_bse_today_backtest.py    # one stock, one day (BSE long), no Kite login needed
 ```
 
 Uses free Yahoo Finance 5-min intraday data (last ~60 days only) via
@@ -46,6 +108,35 @@ Uses free Yahoo Finance 5-min intraday data (last ~60 days only) via
 logic (2% averaging/exit by default, 5x leverage, real Zerodha intraday
 costs, mark-to-market daily loss cap). Edit `DAILY_PLAN` in
 `scripts/run_daily_plan_backtest.py` to test your own dated picks.
+
+These read Kite's feed — the same one live/shadow mode trades on — so they
+need a same-day token (see Authenticate above). `scripts/run_bse_today_backtest.py`
+also takes `--source yahoo`, which falls back to `src/yahoo_intraday.py`
+(Yahoo's chart endpoint over plain `requests`, same DataFrame shape as
+`src/kite_data.py`, including a 14-day ATR helper) when no token is available
+at all. That's a different vendor's prices, so numbers won't match live mode
+exactly — the script says which source it used.
+
+### Swing backtests (entry triggers)
+
+Separate from the intraday grid: multi-day positions, unlimited averaging
+legs, no square-off, delivery (CNC) costs. See `src/swing_strategy.py`.
+
+```bash
+python3 scripts/compare_entry_triggers.py                        # all triggers, side by side
+python3 scripts/compare_entry_triggers.py 200000 252 nifty200 1500000
+python3 scripts/run_52w_low_backtest.py 200000 252 nifty50 1500000 rsi_dip
+```
+
+Args are positional: capital per leg, entry-window length in trading days,
+universe (`nifty50` | `nifty200` | `nifty500`), max total capital (`none`
+for uncapped), and for the single-trigger script a trigger (`52w_low` |
+`rsi_dip`) and source (`yahoo` | `kite`).
+
+These need only **daily** bars, which Yahoo serves free and without auth via
+`src/yahoo_daily.py` — so unlike the intraday backtests they run with no Kite
+login at all. Bars are cached under `.cache/` per fetch-date, so re-running
+with different strategy parameters doesn't re-download the universe.
 
 ## Shadow mode (paper trading against live data)
 
@@ -74,3 +165,37 @@ added later enters at whatever the price is right then (using the day's
 open wouldn't make sense for a symbol you only decided on at 10 AM). No
 new entries are taken after 2:30 PM, since there's not enough of the day
 left for the strategy to do anything with a fresh position.
+
+## Depth scanner (live alerts, no picks needed)
+
+```bash
+python3 -m src.auth              # re-authenticate (daily)
+python3 scripts/run_depth_scanner.py
+```
+
+Polls `kite.quote()` for the Nifty 200 universe (`src/screener.py`'s list)
+every 10s during market hours. A symbol only gets a Telegram alert once
+**all three** agree, the same combination that was actually present
+before GRANULESIND's two up-legs on 2026-09-11:
+
+1. **Depth** — visible top-5 order book skews >= 85% to one side (buy or
+   sell), with a minimum total book size so thin/illiquid names don't
+   trigger on noise.
+2. **Price** — last traded price is at/within 0.15% of today's high (for
+   a buy signal) or low (for a sell signal) — i.e. actually breaking out
+   right now, not just up or down on the day.
+3. **Volume** — trading pace since the last poll is running at least 3x
+   the stock's own average pace since today's open (self-normalizing per
+   stock; skipped for the first 5 minutes after open, since the day's
+   average pace isn't meaningful yet).
+
+Depth-only candidates that don't clear price/volume are still printed to
+the console each poll (for visibility) but don't page you. Read-only: it
+only calls `kite.quote()`, never places an order. Each alert re-fires at
+most once every 15 minutes per symbol+side while it stays confirmed.
+
+This is a stronger filter than depth alone, not a guarantee — even a
+confirmed alert is "go look at the chart," not an auto-entry signal.
+Requires `TELEGRAM_BOT_TOKEN`/`TELEGRAM_CHAT_ID` in `.env` (see
+`src/telegram_notify.py`); without them it just prints alerts to the
+console.

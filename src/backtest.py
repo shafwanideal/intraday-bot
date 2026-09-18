@@ -17,12 +17,56 @@ __all__ = [
     "run_backtest",
     "summarize",
     "per_symbol_comparison",
+    "parse_plan_entry",
+    "validate_day_plan_allocations",
     "GRID_PCT",
     "LEVERAGE",
     "MARGIN_CAPITAL",
     "DAILY_LOSS_CAP",
     "DEFAULT_ATR_MULTIPLIER",
 ]
+
+
+def parse_plan_entry(entry: str | dict) -> tuple[str, float | None]:
+    """A daily_plan entry for one symbol is either a plain direction string
+    (`"long"`) -- equal capital split across the day's slots, the original
+    behavior -- or `{"direction": "long", "pct": 33}` to size that position
+    at an explicit percentage of margin_capital instead. Returns
+    (direction, pct_or_None). Shared by run_backtest and the scripts that
+    build a daily_plan by hand, so both apply the identical rule."""
+    if isinstance(entry, str):
+        return entry, None
+    direction = entry.get("direction")
+    pct = entry.get("pct")
+    if direction not in ("long", "short"):
+        raise ValueError(f"Invalid direction {direction!r} in plan entry {entry!r} -- must be 'long' or 'short'.")
+    if pct is not None:
+        pct = float(pct)
+        if not (0 < pct <= 100):
+            raise ValueError(f"pct must be between 0 and 100, got {pct} in plan entry {entry!r}.")
+    return direction, pct
+
+
+def validate_day_plan_allocations(day_plan: dict[str, str | dict]) -> None:
+    """A day's plan must be ALL-or-NOTHING on explicit percentages: either
+    every symbol gives one (so the capital math is unambiguous) or none do
+    (falling back to the original equal-split behavior). Mixing the two
+    would leave the un-allocated symbols' share undefined -- rather than
+    silently falling back to some improvised leftover split, this is a
+    deliberate configuration mistake worth stopping on immediately.
+    Also rejects percentages that sum past 100 -- that's asking to deploy
+    more than the day's margin capital, almost always a typo."""
+    parsed = {sym: parse_plan_entry(entry) for sym, entry in day_plan.items()}
+    has_pct = {sym: pct is not None for sym, (_, pct) in parsed.items()}
+    if any(has_pct.values()) and not all(has_pct.values()):
+        missing = sorted(sym for sym, given in has_pct.items() if not given)
+        raise ValueError(
+            f"Some symbols have an explicit pct allocation and some don't: {missing} are missing one. "
+            "Give every symbol a pct, or none at all (equal split)."
+        )
+    total_pct = sum(pct for _, pct in parsed.values() if pct is not None)
+    if total_pct > 100 + 1e-9:
+        raise ValueError(f"Percentages sum to {total_pct:.2f}%, which is over 100% of margin capital.")
 
 
 def run_backtest(
@@ -42,6 +86,8 @@ def run_backtest(
     per_stock_stop_loss: float | None = None,
     portfolio_profit_lock_trigger: float | None = None,
     portfolio_profit_lock_giveback: float | None = None,
+    portfolio_profit_lock_fixed: bool = False,
+    daily_profit_target: float | None = None,
     enable_averaging: bool = True,
     trailing_activation_pct: float | None = None,
     averaging_pct: float | None = None,
@@ -89,6 +135,8 @@ def run_backtest(
     for day in all_days:
         day_symbols = list(daily_plan[day].keys()) if daily_plan is not None else symbols
         day_directions = daily_plan[day] if daily_plan is not None else directions
+        if daily_plan is not None:
+            validate_day_plan_allocations(daily_plan[day])
 
         day_bars = {
             sym: data[sym][data[sym].index.date == day]
@@ -112,6 +160,8 @@ def run_backtest(
             per_stock_stop_loss=per_stock_stop_loss,
             portfolio_profit_lock_trigger=portfolio_profit_lock_trigger,
             portfolio_profit_lock_giveback=portfolio_profit_lock_giveback,
+            portfolio_profit_lock_fixed=portfolio_profit_lock_fixed,
+            daily_profit_target=daily_profit_target,
             enable_averaging=enable_averaging,
             trailing_activation_pct=trailing_activation_pct,
             averaging_pct=averaging_pct,
@@ -132,8 +182,26 @@ def run_backtest(
                     if symbol not in day_bars or t not in day_bars[symbol].index:
                         continue
                     price = day_bars[symbol].loc[t, "Open"]
-                    direction = day_directions.get(symbol, "long")
-                    if engine.enter(symbol, price, direction, t, atr=symbol_atr.get(symbol)):
+                    entry_spec = day_directions.get(symbol, "long")
+                    # "rupees" and "qty" are absolute sizing modes for one-off backtest
+                    # diagnostics (e.g. "put exactly Rs 25,000 into this stock" or "size
+                    # it to match this many real shares") -- independent of margin_capital
+                    # and leverage, and not part of the pct all-or-nothing/sum<=100% rule
+                    # (validate_day_plan_allocations only looks at "pct"). Checked before
+                    # falling back to parse_plan_entry's pct/equal-split handling.
+                    if isinstance(entry_spec, dict) and entry_spec.get("rupees") is not None:
+                        direction = entry_spec["direction"]
+                        quantity = float(entry_spec["rupees"]) / price
+                    elif isinstance(entry_spec, dict) and entry_spec.get("qty") is not None:
+                        direction = entry_spec["direction"]
+                        quantity = float(entry_spec["qty"])
+                    else:
+                        direction, pct = parse_plan_entry(entry_spec)
+                        # pct given -> size this position at exactly pct% of margin_capital
+                        # (leveraged), overriding the engine's own equal-split exposure_per_unit.
+                        # None -> unchanged original behavior (equal split across total_units).
+                        quantity = (pct / 100.0 * margin_capital * leverage) / price if pct is not None else None
+                    if engine.enter(symbol, price, direction, t, atr=symbol_atr.get(symbol), quantity=quantity):
                         last_known_price[symbol] = price
 
             if engine.halted:
@@ -154,6 +222,11 @@ def run_backtest(
                 sym: last_known_price.get(sym, pos.avg_price) for sym, pos in engine.open_positions.items()
             }
             engine.check_loss_cap(current_prices, t)
+            if engine.open_positions:
+                current_prices = {
+                    sym: last_known_price.get(sym, pos.avg_price) for sym, pos in engine.open_positions.items()
+                }
+                engine.check_daily_profit_target(current_prices, t)
             if engine.open_positions:
                 current_prices = {
                     sym: last_known_price.get(sym, pos.avg_price) for sym, pos in engine.open_positions.items()

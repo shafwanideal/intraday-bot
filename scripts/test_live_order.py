@@ -33,7 +33,7 @@ def main() -> None:
     reference_price = quote["last_price"]
     print(f"Current {TEST_SYMBOL} price: {reference_price}")
 
-    print(f"\nPlacing BUY order: {TEST_QUANTITY} share(s) of {TEST_SYMBOL}, MIS order (protected limit)...")
+    print(f"\nPlacing BUY order: {TEST_QUANTITY} share(s) of {TEST_SYMBOL}, MIS MARKET order (AUTO market protection)...")
     try:
         buy_order_id = orders.place_market_order(
             kite, TEST_SYMBOL, "BUY", TEST_QUANTITY, reference_price, tag="pipeline_test_buy"

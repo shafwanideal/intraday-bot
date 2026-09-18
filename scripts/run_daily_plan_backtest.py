@@ -29,8 +29,13 @@ CAVEATS:
   tick.
 - Only ONE averaging leg is modeled: entry + one add-on, not a multi-level
   grid.
-- Leverage modeled at a flat 5x on margin -- real Zerodha MIS leverage
-  varies per stock, verify via Kite's margin calculator before trading live.
+- Leverage: these dated entries were originally run under the 5x default in
+  place at the time, then LEVERAGE briefly became a global 1x default from
+  2026-09-13 (no-leverage rule change). It reverted back to 5x on 2026-09-17
+  (explicit user request), so re-running this exact script now reproduces
+  the original 5x-leveraged P&L again -- no leverage= override needed for
+  that. If you specifically want the brief 1x-era interpretation instead,
+  pass leverage=1 explicitly to backtest.run_backtest here.
 - Transaction costs ARE modeled (brokerage, STT, exchange charges, SEBI
   charges, stamp duty, GST) on the leveraged order value. Slippage is NOT
   modeled.
