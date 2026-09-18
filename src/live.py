@@ -23,6 +23,7 @@ from .strategy import (
     TRAIL_STOP,
     GridEngine,
     Position,
+    compute_daily_profit_target,
     compute_portfolio_profit_lock_trigger,
     pnl,
     position_cost,
@@ -114,6 +115,7 @@ class LiveLogger:
         "exit",
         "averaging",
         "daily_loss_cap_exit",
+        "daily_profit_target_exit",
         "per_stock_stop_loss_exit",
         "portfolio_profit_lock_exit",
         "square_off",
@@ -182,6 +184,8 @@ def _format_event(kind: str, fields: dict) -> str:
         return f"\U0001f514 SQUARE-OFF {sym} qty={qty} @ {price}"
     if kind == "daily_loss_cap_exit":
         return f"\U0001f6d1 LOSS CAP HIT -- closing {sym} qty={qty} @ {price}"
+    if kind == "daily_profit_target_exit":
+        return f"\U0001f3af DAILY TARGET HIT -- closing {sym} qty={qty} @ {price}"
     if kind == "per_stock_stop_loss_exit":
         return f"\U0001f6d1 STOP-LOSS {sym} qty={qty} @ {price}"
     if kind == "portfolio_profit_lock_exit":
@@ -543,6 +547,11 @@ def build_plan_summary(
         )
     atr_desc = f"{engine.atr_multiplier}x" if engine.atr_multiplier is not None else "off (fixed %)"
     lines.append(f"Daily loss cap: Rs {engine.daily_loss_cap:,.2f}  |  Grid: {engine.grid_pct:.1%}  |  ATR trail: {atr_desc}")
+    if engine.daily_profit_target is not None:
+        lines.append(
+            f"Daily profit target: Rs {engine.daily_profit_target:,.2f} -- hard ceiling, "
+            "closes everything the instant total P&L reaches it (no pullback wait)"
+        )
     lines.append(f"Realized P&L today (seeded from Kite): Rs {engine.daily_pnl:,.2f}")
     if engine.portfolio_profit_lock_trigger is not None:
         if engine.portfolio_profit_lock_fixed:
@@ -684,6 +693,15 @@ def run_live(
         # ratcheting up with the peak -- see check_portfolio_profit_lock. Makes
         # portfolio_profit_lock_giveback irrelevant here (only used in ratcheting mode).
         portfolio_profit_lock_fixed=True,
+        # 2026-09-18 request: a hard take-profit ceiling on top of the profit lock above --
+        # closes everything the instant total P&L first reaches this level, rather than
+        # waiting for the profit lock's pullback. Same DAILY_PROFIT_TARGET_OVERRIDE pattern
+        # as PORTFOLIO_PROFIT_LOCK_TRIGGER_OVERRIDE for a one-off session change.
+        daily_profit_target=(
+            float(os.environ["DAILY_PROFIT_TARGET_OVERRIDE"])
+            if os.environ.get("DAILY_PROFIT_TARGET_OVERRIDE", "").strip()
+            else compute_daily_profit_target(margin_capital)
+        ),
         # per_stock_stop_loss intentionally NOT wired in as a live default -- tested against
         # today's actual trades (2026-08-28) and it would have cut STARCEMENT right before
         # its partial recovery, making the day worse (-Rs 1,150 vs the real +Rs 33). Left
@@ -1118,6 +1136,28 @@ def run_live(
                     )
                 else:
                     logger.event("daily_loss_cap_exit", symbol=symbol, price=fill["average_price"], qty=fill["filled_quantity"])
+                    correct_exit_pnl(symbol, result, fill)
+
+            for result in engine.check_daily_profit_target(current_prices, _now()):
+                symbol = result["symbol"]
+                sell_qty = real_qty.pop(symbol, None)
+                if sell_qty is None:
+                    logger.critical(
+                        f"{symbol} daily-profit-target exit triggered but no real_qty on record. Check Kite directly.",
+                        symbol=symbol,
+                    )
+                    continue
+                transaction_type = "SELL" if result["direction"] == "long" else "BUY"
+                fill = place_and_confirm(symbol, transaction_type, sell_qty, result["exit_price"], tag="daily_profit_target")
+                if fill["status"] != "COMPLETE":
+                    logger.critical(
+                        f"{symbol} daily-profit-target exit did NOT confirm filled -- "
+                        "real position may still be open. Check Kite directly and close it manually.",
+                        symbol=symbol,
+                        fill_result=fill,
+                    )
+                else:
+                    logger.event("daily_profit_target_exit", symbol=symbol, price=fill["average_price"], qty=fill["filled_quantity"])
                     correct_exit_pnl(symbol, result, fill)
 
             for result in engine.check_per_stock_stop_loss(current_prices, _now()):

@@ -117,6 +117,28 @@ def compute_portfolio_profit_lock_trigger(margin_capital: float) -> float:
     return PORTFOLIO_PROFIT_LOCK_TRIGGER_PCT * margin_capital
 
 
+DAILY_PROFIT_TARGET_PCT = 0.0533  # 2026-09-18 request: a hard daily take-profit ceiling,
+# on top of (not instead of) the portfolio profit lock above. Same 2.667%-on-Rs-75,000
+# ratio as the other two (Rs 4,000 on Rs 75,000), scaling with margin_capital rather than
+# staying a fixed rupee figure that goes stale as capital changes.
+#
+# Distinct from portfolio_profit_lock: that one only fires on the way back DOWN once
+# armed (it never caps the upside on its own -- see check_portfolio_profit_lock's
+# docstring). This fires the moment total P&L first REACHES the target, locking in the
+# win immediately rather than waiting for a pullback -- added after a 2026-09-18 real
+# session where total P&L peaked near Rs 4,000 unrealized and, by the time the profit
+# lock's pullback-triggered exit actually closed out (detection lag + sequential order
+# placement), the real realized result was negative. Same overshoot risk applies here
+# too: this is checked once per poll, not tick by tick, so the real fill can land a bit
+# short of the target on a fast move -- it substantially narrows the gap, it doesn't
+# eliminate it.
+
+
+def compute_daily_profit_target(margin_capital: float) -> float:
+    """Straight DAILY_PROFIT_TARGET_PCT (5.33%) of the day's actual fund."""
+    return DAILY_PROFIT_TARGET_PCT * margin_capital
+
+
 PORTFOLIO_PROFIT_LOCK_GIVEBACK = 500  # only meaningful when portfolio_profit_lock_fixed=False
 # (the original ratcheting behavior -- see GridEngine.check_portfolio_profit_lock). If total
 # P&L pulls back this much from its peak after arming, everything closes; the lock level
@@ -238,6 +260,7 @@ class GridEngine:
         portfolio_profit_lock_trigger: float | None = None,
         portfolio_profit_lock_giveback: float | None = None,
         portfolio_profit_lock_fixed: bool = False,
+        daily_profit_target: float | None = None,
     ):
         self.grid_pct = grid_pct
         # None means "not explicitly overridden" -- defaults to grid_pct so existing callers
@@ -291,6 +314,11 @@ class GridEngine:
         self.portfolio_profit_lock_fixed = portfolio_profit_lock_fixed
         self.portfolio_profit_lock_armed = False
         self.portfolio_profit_lock_peak = 0.0
+        # Rupee amount -- a hard ceiling, separate from (and checked in addition to)
+        # portfolio_profit_lock_trigger above. Fires the instant total P&L first REACHES
+        # this level, closing everything immediately -- unlike the profit lock, it does
+        # not wait for a pullback. See check_daily_profit_target.
+        self.daily_profit_target = daily_profit_target
 
     def can_enter(self, symbol: str) -> bool:
         return (
@@ -418,6 +446,27 @@ class GridEngine:
             self.halted = True
             return [
                 self._close(sym, current_prices.get(sym, self.open_positions[sym].avg_price), "daily_loss_cap", timestamp)
+                for sym in list(self.open_positions.keys())
+            ]
+        return []
+
+    def check_daily_profit_target(self, current_prices: dict[str, float], timestamp) -> list[dict]:
+        """Mark-to-market: hard ceiling on the whole day's P&L, separate from
+        portfolio_profit_lock_trigger. Flattens everything and halts the moment total
+        (realized + unrealized) P&L first REACHES daily_profit_target -- it does not
+        wait for a pullback the way check_portfolio_profit_lock does. Use both together:
+        this locks in the win the instant the target is hit; the profit lock below it
+        still protects gains that fall short of this ceiling."""
+        if self.halted or not self.open_positions or self.daily_profit_target is None:
+            return []
+        unrealized = sum(
+            pnl(pos.direction, pos.avg_price, current_prices.get(sym, pos.avg_price), pos.qty)
+            for sym, pos in self.open_positions.items()
+        )
+        if self.daily_pnl + unrealized >= self.daily_profit_target:
+            self.halted = True
+            return [
+                self._close(sym, current_prices.get(sym, self.open_positions[sym].avg_price), "daily_profit_target", timestamp)
                 for sym in list(self.open_positions.keys())
             ]
         return []
