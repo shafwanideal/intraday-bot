@@ -115,8 +115,7 @@ DAILY_PLAN: dict[date, dict[str, str]] = {
 
 GRID_PCT = 0.015  # current standing default, strategy.GRID_PCT
 GOAL_DAILY_PNL = 2_000
-MARGIN_CAPITAL = 50_000  # placeholder -- backtest.MARGIN_CAPITAL's standing default. Substitute your
-# real day's margin capital for an accurate number; P&L scales roughly linearly with it.
+MARGIN_CAPITAL = 75_000  # Shafwan's real margin capital, as given 2026-09-18.
 TOTAL_UNITS = 6  # largest single day's symbol count (11 Sep, 17 Sep, 18 Sep) -- see module docstring
 MAX_CONCURRENT_POSITIONS = 6
 
