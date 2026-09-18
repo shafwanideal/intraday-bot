@@ -2,6 +2,7 @@ import json
 import math
 import os
 import time as time_module
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, time
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -857,6 +858,63 @@ def run_live(
         exit_result["costs"] = real_costs
         exit_result["pnl"] = real_net
 
+    def exit_positions_concurrently(results: list[dict], tag: str, event_kind: str) -> None:
+        """Places every exit order in `results` (from one check_loss_cap/
+        check_daily_profit_target/check_per_stock_stop_loss/check_portfolio_profit_lock/
+        square_off call) AT THE SAME TIME instead of one after another.
+
+        Real gap, 2026-09-18: when several positions closed together on a
+        portfolio-profit-lock hit, they closed sequentially -- each order fully
+        placed and confirmed before the next one even started. During a fast
+        move, price kept running against the positions still waiting their turn,
+        widening the overshoot beyond what detection lag alone explains. Firing
+        every order at (almost) the same instant removes that queueing delay --
+        the worst case becomes "one order's round-trip", not "N orders' round-trips
+        added together".
+
+        real_qty is popped for every symbol up front, single-threaded, before any
+        thread starts -- each worker thread then only touches its own symbol's
+        key in the shared dicts it reads (current_prices) or calls into
+        (place_and_confirm, correct_exit_pnl), so there's no concurrent access to
+        the same key from two threads at once."""
+        if not results:
+            return
+
+        tasks = []
+        for result in results:
+            symbol = result["symbol"]
+            sell_qty = real_qty.pop(symbol, None)
+            if sell_qty is None:
+                logger.critical(
+                    f"{symbol} {tag} exit triggered but no real_qty on record. Check Kite directly.",
+                    symbol=symbol,
+                )
+                continue
+            transaction_type = "SELL" if result["direction"] == "long" else "BUY"
+            tasks.append((result, symbol, transaction_type, sell_qty))
+        if not tasks:
+            return
+
+        with ThreadPoolExecutor(max_workers=len(tasks)) as pool:
+            futures = {
+                pool.submit(place_and_confirm, symbol, transaction_type, sell_qty, result["exit_price"], tag=tag): result
+                for result, symbol, transaction_type, sell_qty in tasks
+            }
+            for future in futures:
+                result = futures[future]
+                symbol = result["symbol"]
+                fill = future.result()
+                if fill["status"] != "COMPLETE":
+                    logger.critical(
+                        f"{symbol} {tag} exit did NOT confirm filled -- "
+                        "real position may still be open. Check Kite directly and close it manually.",
+                        symbol=symbol,
+                        fill_result=fill,
+                    )
+                else:
+                    logger.event(event_kind, symbol=symbol, price=fill["average_price"], qty=fill["filled_quantity"])
+                    correct_exit_pnl(symbol, result, fill)
+
     # Set once should_stop() first returns True and never cleared -- a stop is
     # a one-way decision for the rest of the session. Re-arming mid-day would
     # mean re-entering positions the user just asked to be out of.
@@ -1122,118 +1180,20 @@ def run_live(
                         real_qty[symbol] = real_qty.get(symbol, 0) + real_filled
                         logger.event("averaging", symbol=symbol, price=fill["average_price"], qty=real_filled)
 
-            for result in engine.check_loss_cap(current_prices, _now()):
-                symbol = result["symbol"]
-                sell_qty = real_qty.pop(symbol, None)
-                if sell_qty is None:
-                    logger.critical(
-                        f"{symbol} daily-loss-cap exit triggered but no real_qty on record. Check Kite directly.",
-                        symbol=symbol,
-                    )
-                    continue
-                transaction_type = "SELL" if result["direction"] == "long" else "BUY"
-                fill = place_and_confirm(symbol, transaction_type, sell_qty, result["exit_price"], tag="daily_loss_cap")
-                if fill["status"] != "COMPLETE":
-                    logger.critical(
-                        f"{symbol} daily-loss-cap exit did NOT confirm filled -- "
-                        "real position may still be open. Check Kite directly and close it manually.",
-                        symbol=symbol,
-                        fill_result=fill,
-                    )
-                else:
-                    logger.event("daily_loss_cap_exit", symbol=symbol, price=fill["average_price"], qty=fill["filled_quantity"])
-                    correct_exit_pnl(symbol, result, fill)
-
-            for result in engine.check_daily_profit_target(current_prices, _now()):
-                symbol = result["symbol"]
-                sell_qty = real_qty.pop(symbol, None)
-                if sell_qty is None:
-                    logger.critical(
-                        f"{symbol} daily-profit-target exit triggered but no real_qty on record. Check Kite directly.",
-                        symbol=symbol,
-                    )
-                    continue
-                transaction_type = "SELL" if result["direction"] == "long" else "BUY"
-                fill = place_and_confirm(symbol, transaction_type, sell_qty, result["exit_price"], tag="daily_profit_target")
-                if fill["status"] != "COMPLETE":
-                    logger.critical(
-                        f"{symbol} daily-profit-target exit did NOT confirm filled -- "
-                        "real position may still be open. Check Kite directly and close it manually.",
-                        symbol=symbol,
-                        fill_result=fill,
-                    )
-                else:
-                    logger.event("daily_profit_target_exit", symbol=symbol, price=fill["average_price"], qty=fill["filled_quantity"])
-                    correct_exit_pnl(symbol, result, fill)
-
-            for result in engine.check_per_stock_stop_loss(current_prices, _now()):
-                symbol = result["symbol"]
-                sell_qty = real_qty.pop(symbol, None)
-                if sell_qty is None:
-                    logger.critical(
-                        f"{symbol} per-stock stop-loss triggered but no real_qty on record. Check Kite directly.",
-                        symbol=symbol,
-                    )
-                    continue
-                transaction_type = "SELL" if result["direction"] == "long" else "BUY"
-                fill = place_and_confirm(symbol, transaction_type, sell_qty, result["exit_price"], tag="per_stock_stop_loss")
-                if fill["status"] != "COMPLETE":
-                    logger.critical(
-                        f"{symbol} per-stock stop-loss exit did NOT confirm filled -- "
-                        "real position may still be open. Check Kite directly and close it manually.",
-                        symbol=symbol,
-                        fill_result=fill,
-                    )
-                else:
-                    logger.event("per_stock_stop_loss_exit", symbol=symbol, price=fill["average_price"], qty=fill["filled_quantity"])
-                    correct_exit_pnl(symbol, result, fill)
-
-            for result in engine.check_portfolio_profit_lock(current_prices, _now()):
-                symbol = result["symbol"]
-                sell_qty = real_qty.pop(symbol, None)
-                if sell_qty is None:
-                    logger.critical(
-                        f"{symbol} portfolio-profit-lock exit triggered but no real_qty on record. Check Kite directly.",
-                        symbol=symbol,
-                    )
-                    continue
-                transaction_type = "SELL" if result["direction"] == "long" else "BUY"
-                fill = place_and_confirm(symbol, transaction_type, sell_qty, result["exit_price"], tag="profit_lock")
-                if fill["status"] != "COMPLETE":
-                    logger.critical(
-                        f"{symbol} portfolio-profit-lock exit did NOT confirm filled -- "
-                        "real position may still be open. Check Kite directly and close it manually.",
-                        symbol=symbol,
-                        fill_result=fill,
-                    )
-                else:
-                    logger.event("portfolio_profit_lock_exit", symbol=symbol, price=fill["average_price"], qty=fill["filled_quantity"])
-                    correct_exit_pnl(symbol, result, fill)
+            exit_positions_concurrently(engine.check_loss_cap(current_prices, _now()), "daily_loss_cap", "daily_loss_cap_exit")
+            exit_positions_concurrently(
+                engine.check_daily_profit_target(current_prices, _now()), "daily_profit_target", "daily_profit_target_exit"
+            )
+            exit_positions_concurrently(
+                engine.check_per_stock_stop_loss(current_prices, _now()), "per_stock_stop_loss", "per_stock_stop_loss_exit"
+            )
+            exit_positions_concurrently(
+                engine.check_portfolio_profit_lock(current_prices, _now()), "profit_lock", "portfolio_profit_lock_exit"
+            )
 
             if (now >= SQUARE_OFF_TIME or stopping) and engine.open_positions:
                 square_off_tag = "square_off" if now >= SQUARE_OFF_TIME else "manual_stop"
-                for result in engine.square_off(current_prices, _now()):
-                    symbol = result["symbol"]
-                    sell_qty = real_qty.pop(symbol, None)
-                    if sell_qty is None:
-                        logger.critical(
-                            f"{symbol} SQUARE-OFF triggered but no real_qty on record -- "
-                            "position may still be open past market close. Check Kite directly RIGHT NOW.",
-                            symbol=symbol,
-                        )
-                        continue
-                    transaction_type = "SELL" if result["direction"] == "long" else "BUY"
-                    fill = place_and_confirm(symbol, transaction_type, sell_qty, result["exit_price"], tag=square_off_tag)
-                    if fill["status"] != "COMPLETE":
-                        logger.critical(
-                            f"{symbol} SQUARE-OFF order did NOT confirm filled -- "
-                            "this position may still be open past market close. Check Kite directly RIGHT NOW.",
-                            symbol=symbol,
-                            fill_result=fill,
-                        )
-                    else:
-                        logger.event("square_off", symbol=symbol, price=fill["average_price"], qty=fill["filled_quantity"])
-                        correct_exit_pnl(symbol, result, fill)
+                exit_positions_concurrently(engine.square_off(current_prices, _now()), square_off_tag, "square_off")
 
             logger.event(
                 "heartbeat",
