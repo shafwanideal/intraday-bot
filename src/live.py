@@ -43,7 +43,14 @@ def _now() -> datetime:
 
 MARKET_OPEN = time(9, 15)
 MARKET_CLOSE = time(15, 30)
-POLL_INTERVAL_SECONDS = 15
+# Tightened 2026-09-18 (was 15) after a portfolio-profit-lock exit overshot its
+# target by ~Rs 1,850 in real terms -- part of that gap was detection lag: at
+# 15s, total P&L could keep falling for up to 15 real seconds after crossing
+# the floor before the check even ran again. Kite's quote/OHLC endpoint is
+# rate-limited to 1 request/second (one kite.ohlc() call happens per poll),
+# so 5s leaves a wide safety margin (0.2 req/sec actual) while cutting worst-case
+# detection lag to a third of what it was.
+POLL_INTERVAL_SECONDS = 5
 LATE_ENTRY_CUTOFF = time(14, 30)
 # NSE's revised pre-open session, effective 2026-09-07: Phase I (9:00-9:05) allows
 # market AND limit orders, Phase II (9:05-9:10) allows LIMIT ORDERS ONLY --
