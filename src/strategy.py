@@ -484,10 +484,20 @@ class GridEngine:
         each bar's Open and worst-case extreme (Low for a long position, High
         for a short) per symbol, letting this catch a breach that happened
         mid-bar via _interp_close_all rather than only at the bar's close --
-        see that method's docstring for why this matters."""
+        see that method's docstring for why this matters.
+
+        Only used with exactly one open position: combining each
+        symbol's own worst-case extreme into a portfolio total assumes every
+        symbol hits its individual extreme simultaneously, which real,
+        unrelated stocks don't do -- it manufactures a portfolio swing far
+        bigger than anything that actually happened and can even close a
+        winning day at a fabricated loss. With exactly one open position, a
+        symbol's own extreme IS the portfolio's extreme, so the assumption is
+        exact rather than an approximation -- that single-position case is
+        where this still applies."""
         if self.halted or not self.open_positions:
             return []
-        if open_prices is not None and worst_prices is not None:
+        if open_prices is not None and worst_prices is not None and len(self.open_positions) == 1:
             total_worst = self._total_pnl_at(worst_prices)
             if total_worst <= -self.daily_loss_cap:
                 self.halted = True
@@ -524,10 +534,14 @@ class GridEngine:
         `open_prices`/`best_prices` are optional and backtest-only (see
         check_loss_cap's docstring for the identical mid-bar rationale, just on
         the profit side here: each symbol's bar Open and best-case extreme,
-        High for a long / Low for a short)."""
+        High for a long / Low for a short).
+
+        Only used with exactly one open position -- see check_loss_cap's
+        docstring for why combining several symbols' own extremes into one
+        portfolio total is invalid with more than one position open."""
         if self.halted or not self.open_positions or self.daily_profit_target is None:
             return []
-        if open_prices is not None and best_prices is not None:
+        if open_prices is not None and best_prices is not None and len(self.open_positions) == 1:
             total_best = self._total_pnl_at(best_prices)
             if total_best >= self.daily_profit_target:
                 self.halted = True
@@ -602,10 +616,17 @@ class GridEngine:
         position arming this trigger then giving almost all of it back
         within the SAME bar closed near breakeven under close-only checking,
         because neither the true peak nor the true breach point were ever
-        the bar's close."""
+        the bar's close.
+
+        Only used with exactly one open position -- see check_loss_cap's
+        docstring for why combining several symbols' own extremes into one
+        portfolio total is invalid with more than one position open."""
         if self.halted or not self.open_positions or self.portfolio_profit_lock_trigger is None:
             return []
-        intrabar = open_prices is not None and best_prices is not None and worst_prices is not None
+        intrabar = (
+            open_prices is not None and best_prices is not None and worst_prices is not None
+            and len(self.open_positions) == 1
+        )
         total_best = self._total_pnl_at(best_prices) if intrabar else self._total_pnl_at(current_prices)
         total_worst = self._total_pnl_at(worst_prices) if intrabar else self._total_pnl_at(current_prices)
 
