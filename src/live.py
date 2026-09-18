@@ -23,7 +23,6 @@ from .strategy import (
     TRAIL_STOP,
     GridEngine,
     Position,
-    compute_daily_profit_target,
     compute_portfolio_profit_lock_trigger,
     pnl,
     position_cost,
@@ -44,14 +43,19 @@ def _now() -> datetime:
 
 MARKET_OPEN = time(9, 15)
 MARKET_CLOSE = time(15, 30)
-# Tightened 2026-09-18 (was 15) after a portfolio-profit-lock exit overshot its
-# target by ~Rs 1,850 in real terms -- part of that gap was detection lag: at
-# 15s, total P&L could keep falling for up to 15 real seconds after crossing
-# the floor before the check even ran again. Kite's quote/OHLC endpoint is
-# rate-limited to 1 request/second (one kite.ohlc() call happens per poll),
-# so 5s leaves a wide safety margin (0.2 req/sec actual) while cutting worst-case
-# detection lag to a third of what it was.
-POLL_INTERVAL_SECONDS = 5
+# Tightened further 2026-09-18 (15 -> 5 -> 1) per explicit request to monitor P&L
+# as close to every second as possible. 1s is the hard floor, not a arbitrary choice:
+# Kite's quote/OHLC endpoint is rate-limited to 1 request/second, and exactly one
+# kite.ohlc() call happens per poll. Going below 1s would mean firing more than
+# 1 request/second against a 1 request/second cap -- real risk of 429 throttling
+# on the exact endpoint the loss cap/profit lock/target depend on, which is a worse
+# failure mode than the detection lag itself. At poll_interval=1, the loop's own
+# processing time between iterations means the REAL gap between requests is always
+# slightly over 1s (never under), so this stays safely at/under the limit, not AT
+# risk of exceeding it. Going faster than this requires switching from REST polling
+# to Kite's WebSocket tick feed (KiteTicker) -- a larger architecture change, not
+# attempted here.
+POLL_INTERVAL_SECONDS = 1
 LATE_ENTRY_CUTOFF = time(14, 30)
 # NSE's revised pre-open session, effective 2026-09-07: Phase I (9:00-9:05) allows
 # market AND limit orders, Phase II (9:05-9:10) allows LIMIT ORDERS ONLY --
@@ -693,14 +697,16 @@ def run_live(
         # ratcheting up with the peak -- see check_portfolio_profit_lock. Makes
         # portfolio_profit_lock_giveback irrelevant here (only used in ratcheting mode).
         portfolio_profit_lock_fixed=True,
-        # 2026-09-18 request: a hard take-profit ceiling on top of the profit lock above --
-        # closes everything the instant total P&L first reaches this level, rather than
-        # waiting for the profit lock's pullback. Same DAILY_PROFIT_TARGET_OVERRIDE pattern
-        # as PORTFOLIO_PROFIT_LOCK_TRIGGER_OVERRIDE for a one-off session change.
+        # daily_profit_target intentionally NOT a standing default as of 2026-09-18 --
+        # backtest against the user's actual past 6 real trading days
+        # (scripts/run_profit_target_backtest.py) showed it would have cost Rs 6,782
+        # net (capped a rally on 08-14 that kept running well past Rs 4,000, with no
+        # day in that sample where it would have prevented a give-back). Reverted to
+        # the old rules (loss cap + profit lock only) per explicit request. Still
+        # available for a one-off day via DAILY_PROFIT_TARGET_OVERRIDE (env var, same
+        # pattern as PORTFOLIO_PROFIT_LOCK_TRIGGER_OVERRIDE) -- unset means disabled.
         daily_profit_target=(
-            float(os.environ["DAILY_PROFIT_TARGET_OVERRIDE"])
-            if os.environ.get("DAILY_PROFIT_TARGET_OVERRIDE", "").strip()
-            else compute_daily_profit_target(margin_capital)
+            float(os.environ["DAILY_PROFIT_TARGET_OVERRIDE"]) if os.environ.get("DAILY_PROFIT_TARGET_OVERRIDE", "").strip() else None
         ),
         # per_stock_stop_loss intentionally NOT wired in as a live default -- tested against
         # today's actual trades (2026-08-28) and it would have cut STARCEMENT right before
