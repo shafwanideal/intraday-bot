@@ -86,6 +86,8 @@ def run_backtest(
     per_stock_stop_loss: float | None = None,
     portfolio_profit_lock_trigger: float | None = None,
     portfolio_profit_lock_giveback: float | None = None,
+    portfolio_profit_lock_fixed: bool = False,
+    daily_profit_target: float | None = None,
     enable_averaging: bool = True,
     trailing_activation_pct: float | None = None,
     averaging_pct: float | None = None,
@@ -158,6 +160,8 @@ def run_backtest(
             per_stock_stop_loss=per_stock_stop_loss,
             portfolio_profit_lock_trigger=portfolio_profit_lock_trigger,
             portfolio_profit_lock_giveback=portfolio_profit_lock_giveback,
+            portfolio_profit_lock_fixed=portfolio_profit_lock_fixed,
+            daily_profit_target=daily_profit_target,
             enable_averaging=enable_averaging,
             trailing_activation_pct=trailing_activation_pct,
             averaging_pct=averaging_pct,
@@ -218,6 +222,11 @@ def run_backtest(
                 sym: last_known_price.get(sym, pos.avg_price) for sym, pos in engine.open_positions.items()
             }
             engine.check_loss_cap(current_prices, t)
+            if engine.open_positions:
+                current_prices = {
+                    sym: last_known_price.get(sym, pos.avg_price) for sym, pos in engine.open_positions.items()
+                }
+                engine.check_daily_profit_target(current_prices, t)
             if engine.open_positions:
                 current_prices = {
                     sym: last_known_price.get(sym, pos.avg_price) for sym, pos in engine.open_positions.items()
