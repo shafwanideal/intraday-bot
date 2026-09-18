@@ -255,7 +255,7 @@ def run_backtest(
                 current_prices = {
                     sym: last_known_price.get(sym, pos.avg_price) for sym, pos in engine.open_positions.items()
                 }
-                engine.check_per_stock_stop_loss(current_prices, t)
+                engine.check_per_stock_stop_loss(current_prices, t, open_prices=open_prices, worst_prices=worst_prices)
             if engine.open_positions:
                 current_prices = {
                     sym: last_known_price.get(sym, pos.avg_price) for sym, pos in engine.open_positions.items()

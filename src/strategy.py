@@ -561,18 +561,44 @@ class GridEngine:
             ]
         return []
 
-    def check_per_stock_stop_loss(self, current_prices: dict[str, float], timestamp) -> list[dict]:
+    def check_per_stock_stop_loss(
+        self,
+        current_prices: dict[str, float],
+        timestamp,
+        open_prices: dict[str, float] | None = None,
+        worst_prices: dict[str, float] | None = None,
+    ) -> list[dict]:
         """Close any single open position whose own unrealized loss exceeds
         per_stock_stop_loss, regardless of averaging/trailing state -- the one
         protection a position has left once it's already used its one
         averaging leg and still hasn't recovered (see STARCEMENT, 2026-08-28:
         no further automatic exit existed for a position stuck red after
-        averaging, right up until square-off)."""
+        averaging, right up until square-off).
+
+        `open_prices`/`worst_prices` are optional and backtest-only (see
+        check_loss_cap's docstring for the mid-bar rationale). Unlike the
+        portfolio-level checks, this one never combines symbols -- each
+        position is judged only against its own P&L -- so there's no
+        simultaneous-extremes assumption to fabricate, and the intrabar
+        interpolation below is exact regardless of how many positions are
+        open."""
         if self.halted or not self.open_positions or self.per_stock_stop_loss is None:
             return []
+        intrabar = open_prices is not None and worst_prices is not None
         closed = []
         for sym in list(self.open_positions.keys()):
             pos = self.open_positions[sym]
+            if intrabar and sym in open_prices and sym in worst_prices:
+                op, wp = open_prices[sym], worst_prices[sym]
+                unrealized_open = pnl(pos.direction, pos.avg_price, op, pos.qty)
+                unrealized_worst = pnl(pos.direction, pos.avg_price, wp, pos.qty)
+                if unrealized_worst <= -self.per_stock_stop_loss:
+                    span = unrealized_worst - unrealized_open
+                    frac = (-self.per_stock_stop_loss - unrealized_open) / span if span != 0 else 1.0
+                    frac = max(0.0, min(1.0, frac))
+                    exit_price = op + frac * (wp - op)
+                    closed.append(self._close(sym, exit_price, "per_stock_stop_loss", timestamp))
+                continue
             price = current_prices.get(sym, pos.avg_price)
             unrealized = pnl(pos.direction, pos.avg_price, price, pos.qty)
             if unrealized <= -self.per_stock_stop_loss:
