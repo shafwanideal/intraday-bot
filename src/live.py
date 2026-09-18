@@ -24,6 +24,8 @@ from .strategy import (
     GridEngine,
     Position,
     compute_portfolio_profit_lock_trigger,
+    pnl,
+    position_cost,
 )
 
 IST = ZoneInfo("Asia/Kolkata")
@@ -780,6 +782,50 @@ def run_live(
         logger.event("order_result", symbol=symbol, order_id=order_id, **{k: v for k, v in result.items() if k != "raw"})
         return result
 
+    def correct_exit_pnl(symbol: str, exit_result: dict, fill: dict) -> None:
+        """engine._close() (called from inside check_loss_cap/check_portfolio_profit_lock/
+        check_per_stock_stop_loss/square_off) computes exit P&L and adds it to
+        engine.daily_pnl using the QUOTE price seen at the moment the exit was
+        decided -- before the real order is even placed. That's fine for deciding
+        WHEN to exit, but the P&L number it books is only an estimate: real fills
+        placed in a burst (e.g. every position exiting together on a portfolio
+        floor/cap hit) can land meaningfully away from that quote if price moves
+        during the few seconds it takes to place and confirm each order. Real gap,
+        2026-09-18: engine reported +Rs 1,212.77 on a portfolio-profit-lock exit:
+        the real cash outcome on Kite was -Rs 333.46 -- a ~Rs 1,546 difference
+        entirely from this estimate never being corrected against the real fill.
+
+        Called after every successful (COMPLETE) exit fill to overwrite the
+        estimate with the real outcome, adjusting daily_pnl by the difference and
+        updating the trade_log entry (exit_result IS the dict already appended to
+        engine.trade_log, so mutating it here corrects history, not just future
+        reads) so both the running total and the permanent record reflect what
+        actually happened, not what was expected to happen.
+        """
+        real_price = fill["average_price"]
+        real_qty = fill["filled_quantity"] or exit_result["qty"]
+        if real_price is None:
+            return
+        direction = exit_result["direction"]
+        real_gross = pnl(direction, exit_result["avg_price"], real_price, real_qty)
+        real_costs = position_cost(direction, [(exit_result["avg_price"], real_qty)], real_price, real_qty) if engine.apply_costs else 0.0
+        real_net = real_gross - real_costs
+        adjustment = real_net - exit_result["pnl"]
+        engine.daily_pnl += adjustment
+        logger.event(
+            "pnl_corrected",
+            symbol=symbol,
+            estimated_exit_price=exit_result["exit_price"],
+            real_exit_price=real_price,
+            estimated_pnl=exit_result["pnl"],
+            real_pnl=real_net,
+            adjustment=round(adjustment, 2),
+        )
+        exit_result["exit_price"] = real_price
+        exit_result["gross_pnl"] = real_gross
+        exit_result["costs"] = real_costs
+        exit_result["pnl"] = real_net
+
     # Set once should_stop() first returns True and never cleared -- a stop is
     # a one-way decision for the rest of the session. Re-arming mid-day would
     # mean re-entering positions the user just asked to be out of.
@@ -1012,6 +1058,7 @@ def run_live(
                         )
                     else:
                         logger.event("exit", symbol=symbol, reason=result["reason"], price=fill["average_price"], qty=fill["filled_quantity"])
+                        correct_exit_pnl(symbol, result, fill)
                 elif symbol in engine.open_positions and not pre_averaged.get(symbol, False) and engine.open_positions[symbol].averaged:
                     # Averaging just triggered inside update() -- it appended a leg using
                     # the engine's own fractional qty (exposure/price), which is NOT a
@@ -1064,6 +1111,7 @@ def run_live(
                     )
                 else:
                     logger.event("daily_loss_cap_exit", symbol=symbol, price=fill["average_price"], qty=fill["filled_quantity"])
+                    correct_exit_pnl(symbol, result, fill)
 
             for result in engine.check_per_stock_stop_loss(current_prices, _now()):
                 symbol = result["symbol"]
@@ -1085,6 +1133,7 @@ def run_live(
                     )
                 else:
                     logger.event("per_stock_stop_loss_exit", symbol=symbol, price=fill["average_price"], qty=fill["filled_quantity"])
+                    correct_exit_pnl(symbol, result, fill)
 
             for result in engine.check_portfolio_profit_lock(current_prices, _now()):
                 symbol = result["symbol"]
@@ -1106,6 +1155,7 @@ def run_live(
                     )
                 else:
                     logger.event("portfolio_profit_lock_exit", symbol=symbol, price=fill["average_price"], qty=fill["filled_quantity"])
+                    correct_exit_pnl(symbol, result, fill)
 
             if (now >= SQUARE_OFF_TIME or stopping) and engine.open_positions:
                 square_off_tag = "square_off" if now >= SQUARE_OFF_TIME else "manual_stop"
@@ -1130,6 +1180,7 @@ def run_live(
                         )
                     else:
                         logger.event("square_off", symbol=symbol, price=fill["average_price"], qty=fill["filled_quantity"])
+                        correct_exit_pnl(symbol, result, fill)
 
             logger.event(
                 "heartbeat",
