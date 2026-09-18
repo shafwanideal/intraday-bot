@@ -221,12 +221,36 @@ def run_backtest(
             current_prices = {
                 sym: last_known_price.get(sym, pos.avg_price) for sym, pos in engine.open_positions.items()
             }
-            engine.check_loss_cap(current_prices, t)
+
+            # Each open position's bar Open (interpolation reference) and its
+            # worst/best-case extreme this bar -- Low/High for a long, High/Low for
+            # a short. Only meaningful for symbols actually present in this bar;
+            # falls back to current_prices (i.e. no intrabar info) otherwise, same
+            # as current_prices itself does. Passed to check_loss_cap/
+            # check_daily_profit_target/check_portfolio_profit_lock so they can
+            # catch a threshold crossed mid-bar instead of only at the bar's
+            # close -- see GridEngine._interp_close_all's docstring for why this
+            # matters (a close-only check on Cochin Shipyard's 2026-09-11
+            # gap-down let a -3,000 loss cap realize a -13,000 loss).
+            open_prices, worst_prices, best_prices = {}, {}, {}
+            for sym, pos in engine.open_positions.items():
+                if sym in day_bars and t in day_bars[sym].index:
+                    row = day_bars[sym].loc[t]
+                    open_prices[sym] = row["Open"]
+                    worst_prices[sym] = row["Low"] if pos.direction == "long" else row["High"]
+                    best_prices[sym] = row["High"] if pos.direction == "long" else row["Low"]
+                else:
+                    fallback = current_prices[sym]
+                    open_prices[sym] = fallback
+                    worst_prices[sym] = fallback
+                    best_prices[sym] = fallback
+
+            engine.check_loss_cap(current_prices, t, open_prices=open_prices, worst_prices=worst_prices)
             if engine.open_positions:
                 current_prices = {
                     sym: last_known_price.get(sym, pos.avg_price) for sym, pos in engine.open_positions.items()
                 }
-                engine.check_daily_profit_target(current_prices, t)
+                engine.check_daily_profit_target(current_prices, t, open_prices=open_prices, best_prices=best_prices)
             if engine.open_positions:
                 current_prices = {
                     sym: last_known_price.get(sym, pos.avg_price) for sym, pos in engine.open_positions.items()
@@ -236,7 +260,7 @@ def run_backtest(
                 current_prices = {
                     sym: last_known_price.get(sym, pos.avg_price) for sym, pos in engine.open_positions.items()
                 }
-                engine.check_portfolio_profit_lock(current_prices, t)
+                engine.check_portfolio_profit_lock(current_prices, t, open_prices=open_prices, best_prices=best_prices, worst_prices=worst_prices)
 
             if is_square_off and engine.open_positions:
                 current_prices = {

@@ -433,16 +433,73 @@ class GridEngine:
 
         return None
 
-    def check_loss_cap(self, current_prices: dict[str, float], timestamp) -> list[dict]:
-        """Mark-to-market: realized + unrealized P&L on open positions. Flattens
-        everything and halts new entries/averaging the moment it's breached."""
-        if self.halted or not self.open_positions:
-            return []
-        unrealized = sum(
-            pnl(pos.direction, pos.avg_price, current_prices.get(sym, pos.avg_price), pos.qty)
+    def _total_pnl_at(self, prices: dict[str, float]) -> float:
+        return self.daily_pnl + sum(
+            pnl(pos.direction, pos.avg_price, prices.get(sym, pos.avg_price), pos.qty)
             for sym, pos in self.open_positions.items()
         )
-        if self.daily_pnl + unrealized <= -self.daily_loss_cap:
+
+    def _interp_close_all(self, reason: str, target_total: float, open_prices: dict[str, float], extreme_prices: dict[str, float], timestamp) -> list[dict]:
+        """Close every open position at a price interpolated along its own
+        open->extreme range, at whatever fraction of that range brings the
+        COMBINED total P&L to exactly target_total.
+
+        Backtests only see a bar's Open/High/Low/Close, not the real path
+        price took between them -- a plain close-price check can badly
+        overshoot a threshold if the real move happened mid-bar (see e.g.
+        Cochin Shipyard's 2026-09-11 gap-down: a close-only loss cap check
+        landed near -13,000 against a -3,000 cap). This assumes the total
+        P&L moved roughly linearly from its bar-open value to its bar-extreme
+        value and finds where along that path it would have crossed
+        target_total, exiting each symbol at the matching point on ITS OWN
+        price range -- the same approximation a real intrabar-reactive stop
+        order would achieve. Still an approximation (real price paths aren't
+        linear, and multiple symbols' real crossings needn't be simultaneous),
+        but far closer to reality than only checking the bar's close."""
+        total_open = self._total_pnl_at(open_prices)
+        total_extreme = self._total_pnl_at(extreme_prices)
+        span = total_extreme - total_open
+        frac = (target_total - total_open) / span if span != 0 else 1.0
+        frac = max(0.0, min(1.0, frac))
+        closed = []
+        for sym in list(self.open_positions.keys()):
+            op = open_prices.get(sym, self.open_positions[sym].avg_price)
+            ext = extreme_prices.get(sym, op)
+            exit_price = op + frac * (ext - op)
+            closed.append(self._close(sym, exit_price, reason, timestamp))
+        return closed
+
+    def check_loss_cap(
+        self,
+        current_prices: dict[str, float],
+        timestamp,
+        open_prices: dict[str, float] | None = None,
+        worst_prices: dict[str, float] | None = None,
+    ) -> list[dict]:
+        """Mark-to-market: realized + unrealized P&L on open positions. Flattens
+        everything and halts new entries/averaging the moment it's breached.
+
+        `open_prices`/`worst_prices` are optional and backtest-only (live/shadow
+        never pass them, so their behavior is unchanged): when given, they're
+        each bar's Open and worst-case extreme (Low for a long position, High
+        for a short) per symbol, letting this catch a breach that happened
+        mid-bar via _interp_close_all rather than only at the bar's close --
+        see that method's docstring for why this matters."""
+        if self.halted or not self.open_positions:
+            return []
+        if open_prices is not None and worst_prices is not None:
+            total_worst = self._total_pnl_at(worst_prices)
+            if total_worst <= -self.daily_loss_cap:
+                self.halted = True
+                total_open = self._total_pnl_at(open_prices)
+                if total_open <= -self.daily_loss_cap:
+                    return [
+                        self._close(sym, worst_prices.get(sym, self.open_positions[sym].avg_price), "daily_loss_cap", timestamp)
+                        for sym in list(self.open_positions.keys())
+                    ]
+                return self._interp_close_all("daily_loss_cap", -self.daily_loss_cap, open_prices, worst_prices, timestamp)
+            return []
+        if self._total_pnl_at(current_prices) <= -self.daily_loss_cap:
             self.halted = True
             return [
                 self._close(sym, current_prices.get(sym, self.open_positions[sym].avg_price), "daily_loss_cap", timestamp)
@@ -450,20 +507,39 @@ class GridEngine:
             ]
         return []
 
-    def check_daily_profit_target(self, current_prices: dict[str, float], timestamp) -> list[dict]:
+    def check_daily_profit_target(
+        self,
+        current_prices: dict[str, float],
+        timestamp,
+        open_prices: dict[str, float] | None = None,
+        best_prices: dict[str, float] | None = None,
+    ) -> list[dict]:
         """Mark-to-market: hard ceiling on the whole day's P&L, separate from
         portfolio_profit_lock_trigger. Flattens everything and halts the moment total
         (realized + unrealized) P&L first REACHES daily_profit_target -- it does not
         wait for a pullback the way check_portfolio_profit_lock does. Use both together:
         this locks in the win the instant the target is hit; the profit lock below it
-        still protects gains that fall short of this ceiling."""
+        still protects gains that fall short of this ceiling.
+
+        `open_prices`/`best_prices` are optional and backtest-only (see
+        check_loss_cap's docstring for the identical mid-bar rationale, just on
+        the profit side here: each symbol's bar Open and best-case extreme,
+        High for a long / Low for a short)."""
         if self.halted or not self.open_positions or self.daily_profit_target is None:
             return []
-        unrealized = sum(
-            pnl(pos.direction, pos.avg_price, current_prices.get(sym, pos.avg_price), pos.qty)
-            for sym, pos in self.open_positions.items()
-        )
-        if self.daily_pnl + unrealized >= self.daily_profit_target:
+        if open_prices is not None and best_prices is not None:
+            total_best = self._total_pnl_at(best_prices)
+            if total_best >= self.daily_profit_target:
+                self.halted = True
+                total_open = self._total_pnl_at(open_prices)
+                if total_open >= self.daily_profit_target:
+                    return [
+                        self._close(sym, best_prices.get(sym, self.open_positions[sym].avg_price), "daily_profit_target", timestamp)
+                        for sym in list(self.open_positions.keys())
+                    ]
+                return self._interp_close_all("daily_profit_target", self.daily_profit_target, open_prices, best_prices, timestamp)
+            return []
+        if self._total_pnl_at(current_prices) >= self.daily_profit_target:
             self.halted = True
             return [
                 self._close(sym, current_prices.get(sym, self.open_positions[sym].avg_price), "daily_profit_target", timestamp)
@@ -489,7 +565,14 @@ class GridEngine:
                 closed.append(self._close(sym, price, "per_stock_stop_loss", timestamp))
         return closed
 
-    def check_portfolio_profit_lock(self, current_prices: dict[str, float], timestamp) -> list[dict]:
+    def check_portfolio_profit_lock(
+        self,
+        current_prices: dict[str, float],
+        timestamp,
+        open_prices: dict[str, float] | None = None,
+        best_prices: dict[str, float] | None = None,
+        worst_prices: dict[str, float] | None = None,
+    ) -> list[dict]:
         """Once total (realized + unrealized) P&L first crosses
         portfolio_profit_lock_trigger, arm.
 
@@ -507,33 +590,51 @@ class GridEngine:
 
         Neither mode caps the upside on its own -- only fires on the
         pullback/fallback. Halts further entries once triggered, same as
-        the loss cap, since a profit has already been locked in."""
+        the loss cap, since a profit has already been locked in.
+
+        `open_prices`/`best_prices`/`worst_prices` are optional and
+        backtest-only (see check_loss_cap's docstring for the mid-bar
+        rationale). When given: arming (and peak tracking in ratcheting mode)
+        uses each bar's best-case extreme, so a peak the bar's close alone
+        would have missed still gets recognized -- and the breach check
+        uses the bar's worst-case extreme with _interp_close_all, instead of
+        only the close. This is what fixes a real case found in testing: a
+        position arming this trigger then giving almost all of it back
+        within the SAME bar closed near breakeven under close-only checking,
+        because neither the true peak nor the true breach point were ever
+        the bar's close."""
         if self.halted or not self.open_positions or self.portfolio_profit_lock_trigger is None:
             return []
-        unrealized = sum(
-            pnl(pos.direction, pos.avg_price, current_prices.get(sym, pos.avg_price), pos.qty)
-            for sym, pos in self.open_positions.items()
-        )
-        total = self.daily_pnl + unrealized
+        intrabar = open_prices is not None and best_prices is not None and worst_prices is not None
+        total_best = self._total_pnl_at(best_prices) if intrabar else self._total_pnl_at(current_prices)
+        total_worst = self._total_pnl_at(worst_prices) if intrabar else self._total_pnl_at(current_prices)
 
         if not self.portfolio_profit_lock_armed:
-            if total >= self.portfolio_profit_lock_trigger:
+            if total_best >= self.portfolio_profit_lock_trigger:
                 self.portfolio_profit_lock_armed = True
-                self.portfolio_profit_lock_peak = total
+                self.portfolio_profit_lock_peak = total_best
             return []
 
         if self.portfolio_profit_lock_fixed:
             floor = self.portfolio_profit_lock_trigger
         else:
-            self.portfolio_profit_lock_peak = max(self.portfolio_profit_lock_peak, total)
+            self.portfolio_profit_lock_peak = max(self.portfolio_profit_lock_peak, total_best)
             giveback = self.portfolio_profit_lock_giveback if self.portfolio_profit_lock_giveback is not None else 0.0
             # Floor never drops below the original trigger itself -- it only ratchets UP once the
             # peak grows past trigger + giveback. Same "floor" pattern as the per-position profit
             # lock: 700 is the guaranteed worst case once armed, not just a starting point giveback
             # can erode below.
             floor = max(self.portfolio_profit_lock_peak - giveback, self.portfolio_profit_lock_trigger)
-        if total <= floor:
+        if total_worst <= floor:
             self.halted = True
+            if intrabar:
+                total_open = self._total_pnl_at(open_prices)
+                if total_open <= floor:
+                    return [
+                        self._close(sym, worst_prices.get(sym, self.open_positions[sym].avg_price), "portfolio_profit_lock", timestamp)
+                        for sym in list(self.open_positions.keys())
+                    ]
+                return self._interp_close_all("portfolio_profit_lock", floor, open_prices, worst_prices, timestamp)
             return [
                 self._close(sym, current_prices.get(sym, self.open_positions[sym].avg_price), "portfolio_profit_lock", timestamp)
                 for sym in list(self.open_positions.keys())
