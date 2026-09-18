@@ -43,7 +43,10 @@ def _now() -> datetime:
 
 MARKET_OPEN = time(9, 15)
 MARKET_CLOSE = time(15, 30)
-POLL_INTERVAL_SECONDS = 15
+POLL_INTERVAL_SECONDS = 1  # tightened from 15s -- catches favorable/adverse moves the old interval could miss.
+# CAUTION: Kite's quote/OHLC endpoint rate limit is commonly ~1 req/sec; this polls at
+# exactly that ceiling with zero margin for retries or other concurrent API calls. Verify
+# Kite's current published limit and watch for rate-limit errors before trusting this live.
 LATE_ENTRY_CUTOFF = time(14, 30)
 # The day's official open is only a realistic, fillable reference price for a
 # real order if we're actually placing it close to when the market opened --
