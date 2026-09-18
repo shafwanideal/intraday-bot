@@ -2,6 +2,7 @@ import json
 import math
 import os
 import time as time_module
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, time
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -24,6 +25,8 @@ from .strategy import (
     GridEngine,
     Position,
     compute_portfolio_profit_lock_trigger,
+    pnl,
+    position_cost,
 )
 
 IST = ZoneInfo("Asia/Kolkata")
@@ -41,8 +44,42 @@ def _now() -> datetime:
 
 MARKET_OPEN = time(9, 15)
 MARKET_CLOSE = time(15, 30)
-POLL_INTERVAL_SECONDS = 15
+# Tightened further 2026-09-18 (15 -> 5 -> 1) per explicit request to monitor P&L
+# as close to every second as possible. 1s is the hard floor, not a arbitrary choice:
+# Kite's quote/OHLC endpoint is rate-limited to 1 request/second, and exactly one
+# kite.ohlc() call happens per poll. Going below 1s would mean firing more than
+# 1 request/second against a 1 request/second cap -- real risk of 429 throttling
+# on the exact endpoint the loss cap/profit lock/target depend on, which is a worse
+# failure mode than the detection lag itself. At poll_interval=1, the loop's own
+# processing time between iterations means the REAL gap between requests is always
+# slightly over 1s (never under), so this stays safely at/under the limit, not AT
+# risk of exceeding it. Going faster than this requires switching from REST polling
+# to Kite's WebSocket tick feed (KiteTicker) -- a larger architecture change, not
+# attempted here.
+POLL_INTERVAL_SECONDS = 1
 LATE_ENTRY_CUTOFF = time(14, 30)
+# NSE's revised pre-open session, effective 2026-09-07: Phase I (9:00-9:05) allows
+# market AND limit orders, Phase II (9:05-9:10) allows LIMIT ORDERS ONLY --
+# market orders are rejected outright. orders.place_market_order places a real
+# MARKET order (see MARKET_PROTECTION_AUTO there), so PREOPEN_ORDER_CUTOFF is
+# pinned to the Phase I boundary (9:05), not the window's actual 9:10 close --
+# placing after 9:05 would just get rejected as a MARKET order. PREOPEN_ENTRY_START
+# is when the main loop starts attempting entries instead of waiting for
+# MARKET_OPEN.
+PREOPEN_ENTRY_START = time(9, 0)
+PREOPEN_ORDER_CUTOFF = time(9, 5)
+# Real data, 2026-09-16: checking right at MARKET_OPEN with only a 10s timeout
+# needlessly cancelled 4 genuinely-matched pre-open orders (TITAGARH, YESBANK,
+# PAYTM, SAATVIKGL) before Kite's own systems had caught up -- 3 of the 4 then
+# refilled fine as a fresh regular-session order a few seconds later, but
+# SAATVIKGL never got a follow-up at all. PREOPEN_RESOLUTION_START pushes the
+# check itself back half a minute so the exchange/broker have more real wall-clock
+# time to settle before we even ask; PREOPEN_RESOLUTION_TIMEOUT_SECONDS is now a
+# secondary safety margin on top of that, not the only buffer -- still much
+# shorter than orders.FILL_TIMEOUT_SECONDS (30s), which is sized for a
+# regular-session order expected to fill almost immediately, not a call auction.
+PREOPEN_RESOLUTION_START = time(9, 15, 30)
+PREOPEN_RESOLUTION_TIMEOUT_SECONDS = 15
 # The day's official open is only a realistic, fillable reference price for a
 # real order if we're actually placing it close to when the market opened --
 # not "was this symbol in the plan file when the script started," since the
@@ -83,6 +120,7 @@ class LiveLogger:
         "exit",
         "averaging",
         "daily_loss_cap_exit",
+        "daily_profit_target_exit",
         "per_stock_stop_loss_exit",
         "portfolio_profit_lock_exit",
         "square_off",
@@ -151,6 +189,8 @@ def _format_event(kind: str, fields: dict) -> str:
         return f"\U0001f514 SQUARE-OFF {sym} qty={qty} @ {price}"
     if kind == "daily_loss_cap_exit":
         return f"\U0001f6d1 LOSS CAP HIT -- closing {sym} qty={qty} @ {price}"
+    if kind == "daily_profit_target_exit":
+        return f"\U0001f3af DAILY TARGET HIT -- closing {sym} qty={qty} @ {price}"
     if kind == "per_stock_stop_loss_exit":
         return f"\U0001f6d1 STOP-LOSS {sym} qty={qty} @ {price}"
     if kind == "portfolio_profit_lock_exit":
@@ -512,6 +552,11 @@ def build_plan_summary(
         )
     atr_desc = f"{engine.atr_multiplier}x" if engine.atr_multiplier is not None else "off (fixed %)"
     lines.append(f"Daily loss cap: Rs {engine.daily_loss_cap:,.2f}  |  Grid: {engine.grid_pct:.1%}  |  ATR trail: {atr_desc}")
+    if engine.daily_profit_target is not None:
+        lines.append(
+            f"Daily profit target: Rs {engine.daily_profit_target:,.2f} -- hard ceiling, "
+            "closes everything the instant total P&L reaches it (no pullback wait)"
+        )
     lines.append(f"Realized P&L today (seeded from Kite): Rs {engine.daily_pnl:,.2f}")
     if engine.portfolio_profit_lock_trigger is not None:
         if engine.portfolio_profit_lock_fixed:
@@ -653,6 +698,17 @@ def run_live(
         # ratcheting up with the peak -- see check_portfolio_profit_lock. Makes
         # portfolio_profit_lock_giveback irrelevant here (only used in ratcheting mode).
         portfolio_profit_lock_fixed=True,
+        # daily_profit_target intentionally NOT a standing default as of 2026-09-18 --
+        # backtest against the user's actual past 6 real trading days
+        # (scripts/run_profit_target_backtest.py) showed it would have cost Rs 6,782
+        # net (capped a rally on 08-14 that kept running well past Rs 4,000, with no
+        # day in that sample where it would have prevented a give-back). Reverted to
+        # the old rules (loss cap + profit lock only) per explicit request. Still
+        # available for a one-off day via DAILY_PROFIT_TARGET_OVERRIDE (env var, same
+        # pattern as PORTFOLIO_PROFIT_LOCK_TRIGGER_OVERRIDE) -- unset means disabled.
+        daily_profit_target=(
+            float(os.environ["DAILY_PROFIT_TARGET_OVERRIDE"]) if os.environ.get("DAILY_PROFIT_TARGET_OVERRIDE", "").strip() else None
+        ),
         # per_stock_stop_loss intentionally NOT wired in as a live default -- tested against
         # today's actual trades (2026-08-28) and it would have cut STARCEMENT right before
         # its partial recovery, making the day worse (-Rs 1,150 vs the real +Rs 33). Left
@@ -666,6 +722,13 @@ def run_live(
     # engine's qty is fine for its own P&L bookkeeping; real order quantities
     # must come from here.
     real_qty: dict[str, int] = {}
+    # Pre-open orders placed during PREOPEN_ENTRY_START..PREOPEN_ORDER_CUTOFF, awaiting
+    # the exchange's call-auction match -- NOT run through wait_for_fill (which would
+    # time out and cancel long before matching happens at 9:10-9:12). Resolved once
+    # MARKET_OPEN arrives; see the resolution pass in the main loop below. A symbol
+    # stays out of entered_today while pending, so an unmatched pre-open order still
+    # falls through to a normal entry attempt at 9:15.
+    pending_preopen: dict[str, dict] = {}
 
     engine.daily_pnl = _fetch_realized_pnl_today(kite)
     logger.event("daily_pnl_seeded", daily_pnl=engine.daily_pnl)
@@ -751,6 +814,107 @@ def run_live(
         logger.event("order_result", symbol=symbol, order_id=order_id, **{k: v for k, v in result.items() if k != "raw"})
         return result
 
+    def correct_exit_pnl(symbol: str, exit_result: dict, fill: dict) -> None:
+        """engine._close() (called from inside check_loss_cap/check_portfolio_profit_lock/
+        check_per_stock_stop_loss/square_off) computes exit P&L and adds it to
+        engine.daily_pnl using the QUOTE price seen at the moment the exit was
+        decided -- before the real order is even placed. That's fine for deciding
+        WHEN to exit, but the P&L number it books is only an estimate: real fills
+        placed in a burst (e.g. every position exiting together on a portfolio
+        floor/cap hit) can land meaningfully away from that quote if price moves
+        during the few seconds it takes to place and confirm each order. Real gap,
+        2026-09-18: engine reported +Rs 1,212.77 on a portfolio-profit-lock exit:
+        the real cash outcome on Kite was -Rs 333.46 -- a ~Rs 1,546 difference
+        entirely from this estimate never being corrected against the real fill.
+
+        Called after every successful (COMPLETE) exit fill to overwrite the
+        estimate with the real outcome, adjusting daily_pnl by the difference and
+        updating the trade_log entry (exit_result IS the dict already appended to
+        engine.trade_log, so mutating it here corrects history, not just future
+        reads) so both the running total and the permanent record reflect what
+        actually happened, not what was expected to happen.
+        """
+        real_price = fill["average_price"]
+        real_qty = fill["filled_quantity"] or exit_result["qty"]
+        if real_price is None:
+            return
+        direction = exit_result["direction"]
+        real_gross = pnl(direction, exit_result["avg_price"], real_price, real_qty)
+        real_costs = position_cost(direction, [(exit_result["avg_price"], real_qty)], real_price, real_qty) if engine.apply_costs else 0.0
+        real_net = real_gross - real_costs
+        adjustment = real_net - exit_result["pnl"]
+        engine.daily_pnl += adjustment
+        logger.event(
+            "pnl_corrected",
+            symbol=symbol,
+            estimated_exit_price=exit_result["exit_price"],
+            real_exit_price=real_price,
+            estimated_pnl=exit_result["pnl"],
+            real_pnl=real_net,
+            adjustment=round(adjustment, 2),
+        )
+        exit_result["exit_price"] = real_price
+        exit_result["gross_pnl"] = real_gross
+        exit_result["costs"] = real_costs
+        exit_result["pnl"] = real_net
+
+    def exit_positions_concurrently(results: list[dict], tag: str, event_kind: str) -> None:
+        """Places every exit order in `results` (from one check_loss_cap/
+        check_daily_profit_target/check_per_stock_stop_loss/check_portfolio_profit_lock/
+        square_off call) AT THE SAME TIME instead of one after another.
+
+        Real gap, 2026-09-18: when several positions closed together on a
+        portfolio-profit-lock hit, they closed sequentially -- each order fully
+        placed and confirmed before the next one even started. During a fast
+        move, price kept running against the positions still waiting their turn,
+        widening the overshoot beyond what detection lag alone explains. Firing
+        every order at (almost) the same instant removes that queueing delay --
+        the worst case becomes "one order's round-trip", not "N orders' round-trips
+        added together".
+
+        real_qty is popped for every symbol up front, single-threaded, before any
+        thread starts -- each worker thread then only touches its own symbol's
+        key in the shared dicts it reads (current_prices) or calls into
+        (place_and_confirm, correct_exit_pnl), so there's no concurrent access to
+        the same key from two threads at once."""
+        if not results:
+            return
+
+        tasks = []
+        for result in results:
+            symbol = result["symbol"]
+            sell_qty = real_qty.pop(symbol, None)
+            if sell_qty is None:
+                logger.critical(
+                    f"{symbol} {tag} exit triggered but no real_qty on record. Check Kite directly.",
+                    symbol=symbol,
+                )
+                continue
+            transaction_type = "SELL" if result["direction"] == "long" else "BUY"
+            tasks.append((result, symbol, transaction_type, sell_qty))
+        if not tasks:
+            return
+
+        with ThreadPoolExecutor(max_workers=len(tasks)) as pool:
+            futures = {
+                pool.submit(place_and_confirm, symbol, transaction_type, sell_qty, result["exit_price"], tag=tag): result
+                for result, symbol, transaction_type, sell_qty in tasks
+            }
+            for future in futures:
+                result = futures[future]
+                symbol = result["symbol"]
+                fill = future.result()
+                if fill["status"] != "COMPLETE":
+                    logger.critical(
+                        f"{symbol} {tag} exit did NOT confirm filled -- "
+                        "real position may still be open. Check Kite directly and close it manually.",
+                        symbol=symbol,
+                        fill_result=fill,
+                    )
+                else:
+                    logger.event(event_kind, symbol=symbol, price=fill["average_price"], qty=fill["filled_quantity"])
+                    correct_exit_pnl(symbol, result, fill)
+
     # Set once should_stop() first returns True and never cleared -- a stop is
     # a one-way decision for the rest of the session. Re-arming mid-day would
     # mean re-entering positions the user just asked to be out of.
@@ -762,17 +926,17 @@ def run_live(
             if should_stop is not None and not stopping and should_stop():
                 stopping = True
                 logger.event("stop_requested")
-            if now < MARKET_OPEN:
+            if now < PREOPEN_ENTRY_START:
                 if stopping:
                     # Nothing can be open yet (the market hasn't opened, and any
                     # position reconciled from an earlier run today would imply
                     # it had), so there is nothing to square off -- just end.
                     # Without this the stop flag would be set but unreachable:
                     # the square-off and break checks both live below this
-                    # `continue`, so the session would sleep here until 9:15.
+                    # `continue`, so the session would sleep here until 9:00.
                     print("Stop requested before market open. Ending session; no orders placed.")
                     break
-                time_module.sleep(min(poll_interval, 30))
+                time_module.sleep(min(poll_interval, 15))
                 continue
             if now >= MARKET_CLOSE:
                 print("Market closed. Ending live session.")
@@ -812,6 +976,43 @@ def run_live(
 
             _detect_manual_closes(kite, engine, real_qty, logger)
 
+            # Resolve pending pre-open orders once PREOPEN_RESOLUTION_START arrives --
+            # deliberately later than MARKET_OPEN itself (see that constant's comment):
+            # checking too early cancelled genuinely-matched orders on 2026-09-16
+            # before Kite's systems had caught up. A symbol that still didn't match
+            # stays out of entered_today, so the loop below attempts a normal entry
+            # for it instead.
+            if now >= PREOPEN_RESOLUTION_START and pending_preopen:
+                for symbol, pending in list(pending_preopen.items()):
+                    result = orders.wait_for_fill(kite, pending["order_id"], timeout_seconds=PREOPEN_RESOLUTION_TIMEOUT_SECONDS)
+                    logger.event(
+                        "preopen_order_result",
+                        symbol=symbol,
+                        order_id=pending["order_id"],
+                        **{k: v for k, v in result.items() if k != "raw"},
+                    )
+                    del pending_preopen[symbol]
+                    if result["status"] == "COMPLETE" and result["average_price"]:
+                        filled_qty = result["filled_quantity"] or pending["quantity"]
+                        engine.enter(
+                            symbol,
+                            result["average_price"],
+                            pending["direction"],
+                            _now(),
+                            atr=symbol_atr.get(symbol),
+                            quantity=filled_qty,
+                        )
+                        real_qty[symbol] = filled_qty
+                        entered_today.add(symbol)
+                        logger.event(
+                            "entry",
+                            symbol=symbol,
+                            direction=pending["direction"],
+                            price=result["average_price"],
+                            quantity=filled_qty,
+                            venue="preopen",
+                        )
+
             current_prices: dict[str, float] = {}
             for symbol in watch_symbols:
                 quote = quotes.get(f"NSE:{symbol}")
@@ -823,6 +1024,7 @@ def run_live(
                     not stopping
                     and symbol in plan
                     and symbol not in entered_today
+                    and symbol not in pending_preopen
                     and now < LATE_ENTRY_CUTOFF
                     and engine.can_enter(symbol)
                 ):
@@ -843,17 +1045,60 @@ def run_live(
                         continue
 
                     transaction_type = "BUY" if direction == "long" else "SELL"
-                    result = place_and_confirm(symbol, transaction_type, quantity, ref_price, tag="entry", is_entry=True)
-                    entered_today.add(symbol)  # one entry attempt per symbol per day, win or lose
-                    if result["status"] == "COMPLETE" and result["average_price"]:
-                        filled_qty = result["filled_quantity"] or quantity
-                        engine.enter(
-                            symbol, result["average_price"], direction, _now(), atr=symbol_atr.get(symbol), quantity=filled_qty
-                        )
-                        real_qty[symbol] = filled_qty
-                        logger.event("entry", symbol=symbol, direction=direction, price=result["average_price"], quantity=filled_qty)
-                    else:
-                        logger.event("entry_failed", symbol=symbol, direction=direction, quantity=quantity, result=result)
+
+                    if PREOPEN_ENTRY_START <= now < PREOPEN_ORDER_CUTOFF:
+                        # NSE's pre-open Phase I (market orders allowed): place the
+                        # MARKET order and let it queue for the call auction.
+                        # Deliberately NOT run through place_and_confirm/wait_for_fill --
+                        # that would time out after FILL_TIMEOUT_SECONDS (30s) and cancel
+                        # the order long before matching happens at 9:10-9:12. Resolved
+                        # in the pass above once MARKET_OPEN arrives.
+                        try:
+                            order_id = orders.place_market_order(
+                                kite, symbol, transaction_type, quantity, ref_price, tag="preopen_entry"
+                            )
+                        except orders.OrderRejected as exc:
+                            logger.event(
+                                "preopen_order_rejected",
+                                symbol=symbol,
+                                transaction_type=transaction_type,
+                                quantity=quantity,
+                                error=str(exc),
+                            )
+                            # Not added to entered_today -- falls through to a normal
+                            # 9:15 entry attempt instead.
+                        except orders.OrderPlacementAmbiguous as exc:
+                            logger.critical(
+                                f"{symbol} pre-open {transaction_type} order placement is in an UNKNOWN state -- {exc}",
+                                symbol=symbol,
+                                transaction_type=transaction_type,
+                                quantity=quantity,
+                            )
+                            engine.halted = True
+                        else:
+                            logger.event(
+                                "preopen_order_placed",
+                                symbol=symbol,
+                                transaction_type=transaction_type,
+                                quantity=quantity,
+                                order_id=order_id,
+                            )
+                            pending_preopen[symbol] = {"order_id": order_id, "direction": direction, "quantity": quantity}
+                    elif now >= MARKET_OPEN:
+                        result = place_and_confirm(symbol, transaction_type, quantity, ref_price, tag="entry", is_entry=True)
+                        entered_today.add(symbol)  # one entry attempt per symbol per day, win or lose
+                        if result["status"] == "COMPLETE" and result["average_price"]:
+                            filled_qty = result["filled_quantity"] or quantity
+                            engine.enter(
+                                symbol, result["average_price"], direction, _now(), atr=symbol_atr.get(symbol), quantity=filled_qty
+                            )
+                            real_qty[symbol] = filled_qty
+                            logger.event("entry", symbol=symbol, direction=direction, price=result["average_price"], quantity=filled_qty)
+                        else:
+                            logger.event("entry_failed", symbol=symbol, direction=direction, quantity=quantity, result=result)
+                    # else: PREOPEN_ORDER_CUTOFF <= now < MARKET_OPEN -- the pre-open
+                    # window has closed and auction matching is in progress; wait for
+                    # the resolution pass above once MARKET_OPEN arrives.
 
             # Log the exact prices this poll is about to act on, for open positions
             # specifically -- without this, reconstructing what actually happened
@@ -902,6 +1147,7 @@ def run_live(
                         )
                     else:
                         logger.event("exit", symbol=symbol, reason=result["reason"], price=fill["average_price"], qty=fill["filled_quantity"])
+                        correct_exit_pnl(symbol, result, fill)
                 elif symbol in engine.open_positions and not pre_averaged.get(symbol, False) and engine.open_positions[symbol].averaged:
                     # Averaging just triggered inside update() -- it appended a leg using
                     # the engine's own fractional qty (exposure/price), which is NOT a
@@ -934,92 +1180,20 @@ def run_live(
                         real_qty[symbol] = real_qty.get(symbol, 0) + real_filled
                         logger.event("averaging", symbol=symbol, price=fill["average_price"], qty=real_filled)
 
-            for result in engine.check_loss_cap(current_prices, _now()):
-                symbol = result["symbol"]
-                sell_qty = real_qty.pop(symbol, None)
-                if sell_qty is None:
-                    logger.critical(
-                        f"{symbol} daily-loss-cap exit triggered but no real_qty on record. Check Kite directly.",
-                        symbol=symbol,
-                    )
-                    continue
-                transaction_type = "SELL" if result["direction"] == "long" else "BUY"
-                fill = place_and_confirm(symbol, transaction_type, sell_qty, result["exit_price"], tag="daily_loss_cap")
-                if fill["status"] != "COMPLETE":
-                    logger.critical(
-                        f"{symbol} daily-loss-cap exit did NOT confirm filled -- "
-                        "real position may still be open. Check Kite directly and close it manually.",
-                        symbol=symbol,
-                        fill_result=fill,
-                    )
-                else:
-                    logger.event("daily_loss_cap_exit", symbol=symbol, price=fill["average_price"], qty=fill["filled_quantity"])
-
-            for result in engine.check_per_stock_stop_loss(current_prices, _now()):
-                symbol = result["symbol"]
-                sell_qty = real_qty.pop(symbol, None)
-                if sell_qty is None:
-                    logger.critical(
-                        f"{symbol} per-stock stop-loss triggered but no real_qty on record. Check Kite directly.",
-                        symbol=symbol,
-                    )
-                    continue
-                transaction_type = "SELL" if result["direction"] == "long" else "BUY"
-                fill = place_and_confirm(symbol, transaction_type, sell_qty, result["exit_price"], tag="per_stock_stop_loss")
-                if fill["status"] != "COMPLETE":
-                    logger.critical(
-                        f"{symbol} per-stock stop-loss exit did NOT confirm filled -- "
-                        "real position may still be open. Check Kite directly and close it manually.",
-                        symbol=symbol,
-                        fill_result=fill,
-                    )
-                else:
-                    logger.event("per_stock_stop_loss_exit", symbol=symbol, price=fill["average_price"], qty=fill["filled_quantity"])
-
-            for result in engine.check_portfolio_profit_lock(current_prices, _now()):
-                symbol = result["symbol"]
-                sell_qty = real_qty.pop(symbol, None)
-                if sell_qty is None:
-                    logger.critical(
-                        f"{symbol} portfolio-profit-lock exit triggered but no real_qty on record. Check Kite directly.",
-                        symbol=symbol,
-                    )
-                    continue
-                transaction_type = "SELL" if result["direction"] == "long" else "BUY"
-                fill = place_and_confirm(symbol, transaction_type, sell_qty, result["exit_price"], tag="profit_lock")
-                if fill["status"] != "COMPLETE":
-                    logger.critical(
-                        f"{symbol} portfolio-profit-lock exit did NOT confirm filled -- "
-                        "real position may still be open. Check Kite directly and close it manually.",
-                        symbol=symbol,
-                        fill_result=fill,
-                    )
-                else:
-                    logger.event("portfolio_profit_lock_exit", symbol=symbol, price=fill["average_price"], qty=fill["filled_quantity"])
+            exit_positions_concurrently(engine.check_loss_cap(current_prices, _now()), "daily_loss_cap", "daily_loss_cap_exit")
+            exit_positions_concurrently(
+                engine.check_daily_profit_target(current_prices, _now()), "daily_profit_target", "daily_profit_target_exit"
+            )
+            exit_positions_concurrently(
+                engine.check_per_stock_stop_loss(current_prices, _now()), "per_stock_stop_loss", "per_stock_stop_loss_exit"
+            )
+            exit_positions_concurrently(
+                engine.check_portfolio_profit_lock(current_prices, _now()), "profit_lock", "portfolio_profit_lock_exit"
+            )
 
             if (now >= SQUARE_OFF_TIME or stopping) and engine.open_positions:
                 square_off_tag = "square_off" if now >= SQUARE_OFF_TIME else "manual_stop"
-                for result in engine.square_off(current_prices, _now()):
-                    symbol = result["symbol"]
-                    sell_qty = real_qty.pop(symbol, None)
-                    if sell_qty is None:
-                        logger.critical(
-                            f"{symbol} SQUARE-OFF triggered but no real_qty on record -- "
-                            "position may still be open past market close. Check Kite directly RIGHT NOW.",
-                            symbol=symbol,
-                        )
-                        continue
-                    transaction_type = "SELL" if result["direction"] == "long" else "BUY"
-                    fill = place_and_confirm(symbol, transaction_type, sell_qty, result["exit_price"], tag=square_off_tag)
-                    if fill["status"] != "COMPLETE":
-                        logger.critical(
-                            f"{symbol} SQUARE-OFF order did NOT confirm filled -- "
-                            "this position may still be open past market close. Check Kite directly RIGHT NOW.",
-                            symbol=symbol,
-                            fill_result=fill,
-                        )
-                    else:
-                        logger.event("square_off", symbol=symbol, price=fill["average_price"], qty=fill["filled_quantity"])
+                exit_positions_concurrently(engine.square_off(current_prices, _now()), square_off_tag, "square_off")
 
             logger.event(
                 "heartbeat",

@@ -87,6 +87,7 @@ def run_backtest(
     portfolio_profit_lock_trigger: float | None = None,
     portfolio_profit_lock_giveback: float | None = None,
     portfolio_profit_lock_fixed: bool = False,
+    daily_profit_target: float | None = None,
     enable_averaging: bool = True,
     trailing_activation_pct: float | None = None,
     averaging_pct: float | None = None,
@@ -160,6 +161,7 @@ def run_backtest(
             portfolio_profit_lock_trigger=portfolio_profit_lock_trigger,
             portfolio_profit_lock_giveback=portfolio_profit_lock_giveback,
             portfolio_profit_lock_fixed=portfolio_profit_lock_fixed,
+            daily_profit_target=daily_profit_target,
             enable_averaging=enable_averaging,
             trailing_activation_pct=trailing_activation_pct,
             averaging_pct=averaging_pct,
@@ -180,11 +182,25 @@ def run_backtest(
                     if symbol not in day_bars or t not in day_bars[symbol].index:
                         continue
                     price = day_bars[symbol].loc[t, "Open"]
-                    direction, pct = parse_plan_entry(day_directions.get(symbol, "long"))
-                    # pct given -> size this position at exactly pct% of margin_capital
-                    # (leveraged), overriding the engine's own equal-split exposure_per_unit.
-                    # None -> unchanged original behavior (equal split across total_units).
-                    quantity = (pct / 100.0 * margin_capital * leverage) / price if pct is not None else None
+                    entry_spec = day_directions.get(symbol, "long")
+                    # "rupees" and "qty" are absolute sizing modes for one-off backtest
+                    # diagnostics (e.g. "put exactly Rs 25,000 into this stock" or "size
+                    # it to match this many real shares") -- independent of margin_capital
+                    # and leverage, and not part of the pct all-or-nothing/sum<=100% rule
+                    # (validate_day_plan_allocations only looks at "pct"). Checked before
+                    # falling back to parse_plan_entry's pct/equal-split handling.
+                    if isinstance(entry_spec, dict) and entry_spec.get("rupees") is not None:
+                        direction = entry_spec["direction"]
+                        quantity = float(entry_spec["rupees"]) / price
+                    elif isinstance(entry_spec, dict) and entry_spec.get("qty") is not None:
+                        direction = entry_spec["direction"]
+                        quantity = float(entry_spec["qty"])
+                    else:
+                        direction, pct = parse_plan_entry(entry_spec)
+                        # pct given -> size this position at exactly pct% of margin_capital
+                        # (leveraged), overriding the engine's own equal-split exposure_per_unit.
+                        # None -> unchanged original behavior (equal split across total_units).
+                        quantity = (pct / 100.0 * margin_capital * leverage) / price if pct is not None else None
                     if engine.enter(symbol, price, direction, t, atr=symbol_atr.get(symbol), quantity=quantity):
                         last_known_price[symbol] = price
 
@@ -205,17 +221,46 @@ def run_backtest(
             current_prices = {
                 sym: last_known_price.get(sym, pos.avg_price) for sym, pos in engine.open_positions.items()
             }
-            engine.check_loss_cap(current_prices, t)
+
+            # Each open position's bar Open (interpolation reference) and its
+            # worst/best-case extreme this bar -- Low/High for a long, High/Low for
+            # a short. Only meaningful for symbols actually present in this bar;
+            # falls back to current_prices (i.e. no intrabar info) otherwise, same
+            # as current_prices itself does. Passed to check_loss_cap/
+            # check_daily_profit_target/check_portfolio_profit_lock so they can
+            # catch a threshold crossed mid-bar instead of only at the bar's
+            # close -- see GridEngine._interp_close_all's docstring for why this
+            # matters (a close-only check on Cochin Shipyard's 2026-09-11
+            # gap-down let a -3,000 loss cap realize a -13,000 loss).
+            open_prices, worst_prices, best_prices = {}, {}, {}
+            for sym, pos in engine.open_positions.items():
+                if sym in day_bars and t in day_bars[sym].index:
+                    row = day_bars[sym].loc[t]
+                    open_prices[sym] = row["Open"]
+                    worst_prices[sym] = row["Low"] if pos.direction == "long" else row["High"]
+                    best_prices[sym] = row["High"] if pos.direction == "long" else row["Low"]
+                else:
+                    fallback = current_prices[sym]
+                    open_prices[sym] = fallback
+                    worst_prices[sym] = fallback
+                    best_prices[sym] = fallback
+
+            engine.check_loss_cap(current_prices, t, open_prices=open_prices, worst_prices=worst_prices)
             if engine.open_positions:
                 current_prices = {
                     sym: last_known_price.get(sym, pos.avg_price) for sym, pos in engine.open_positions.items()
                 }
-                engine.check_per_stock_stop_loss(current_prices, t)
+                engine.check_daily_profit_target(current_prices, t, open_prices=open_prices, best_prices=best_prices)
             if engine.open_positions:
                 current_prices = {
                     sym: last_known_price.get(sym, pos.avg_price) for sym, pos in engine.open_positions.items()
                 }
-                engine.check_portfolio_profit_lock(current_prices, t)
+                engine.check_per_stock_stop_loss(current_prices, t, open_prices=open_prices, worst_prices=worst_prices)
+            if engine.open_positions:
+                current_prices = {
+                    sym: last_known_price.get(sym, pos.avg_price) for sym, pos in engine.open_positions.items()
+                }
+                engine.check_portfolio_profit_lock(current_prices, t, open_prices=open_prices, best_prices=best_prices, worst_prices=worst_prices)
 
             if is_square_off and engine.open_positions:
                 current_prices = {

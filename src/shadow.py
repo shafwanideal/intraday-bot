@@ -44,7 +44,10 @@ def _now() -> datetime:
 
 MARKET_OPEN = time(9, 15)
 MARKET_CLOSE = time(15, 30)
-POLL_INTERVAL_SECONDS = 15
+POLL_INTERVAL_SECONDS = 1  # tightened from 15s -- catches favorable/adverse moves the old interval could miss.
+# CAUTION: Kite's quote/OHLC endpoint rate limit is commonly ~1 req/sec; this polls at
+# exactly that ceiling with zero margin for retries or other concurrent API calls. Verify
+# Kite's current published limit and watch for rate-limit errors before trusting this live.
 LATE_ENTRY_CUTOFF = time(14, 30)  # don't take new entries this close to square-off
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -192,6 +195,9 @@ def run_shadow(poll_interval: int = POLL_INTERVAL_SECONDS) -> None:
         # see live.py's identical comment on check_portfolio_profit_lock.
         portfolio_profit_lock_trigger=compute_portfolio_profit_lock_trigger(margin_capital),
         portfolio_profit_lock_fixed=True,
+        # daily_profit_target intentionally NOT a standing default -- see live.py's
+        # identical comment (backtest against real past days showed a net cost, not a
+        # net benefit; reverted 2026-09-18 per explicit request).
         # per_stock_stop_loss intentionally NOT wired in as a live default -- see live.py.
     )
     entered_today: set[str] = set()
