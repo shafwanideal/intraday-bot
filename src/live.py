@@ -24,6 +24,7 @@ from .strategy import (
     TRAIL_STOP,
     GridEngine,
     Position,
+    compute_daily_profit_target,
     compute_portfolio_profit_lock_trigger,
     pnl,
     position_cost,
@@ -698,16 +699,18 @@ def run_live(
         # ratcheting up with the peak -- see check_portfolio_profit_lock. Makes
         # portfolio_profit_lock_giveback irrelevant here (only used in ratcheting mode).
         portfolio_profit_lock_fixed=True,
-        # daily_profit_target intentionally NOT a standing default as of 2026-09-18 --
-        # backtest against the user's actual past 6 real trading days
-        # (scripts/run_profit_target_backtest.py) showed it would have cost Rs 6,782
-        # net (capped a rally on 08-14 that kept running well past Rs 4,000, with no
-        # day in that sample where it would have prevented a give-back). Reverted to
-        # the old rules (loss cap + profit lock only) per explicit request. Still
-        # available for a one-off day via DAILY_PROFIT_TARGET_OVERRIDE (env var, same
-        # pattern as PORTFOLIO_PROFIT_LOCK_TRIGGER_OVERRIDE) -- unset means disabled.
+        # Re-enabled as a standing default 2026-09-21 per explicit request ("turn on 4k
+        # profit lock for the fund") -- briefly turned off 2026-09-18 after a backtest
+        # against 6 real past days showed a net cost (it capped a rally on 08-14 that
+        # ran well past Rs 4,000). Re-confirmed the tradeoff with the user before this
+        # change: it can give up upside on a day that keeps climbing, in exchange for
+        # locking in the win immediately rather than risking a reversal. Standing
+        # default is 5.33% of margin_capital (Rs 4,000 on Rs 75,000); still overridable
+        # for one day via DAILY_PROFIT_TARGET_OVERRIDE.
         daily_profit_target=(
-            float(os.environ["DAILY_PROFIT_TARGET_OVERRIDE"]) if os.environ.get("DAILY_PROFIT_TARGET_OVERRIDE", "").strip() else None
+            float(os.environ["DAILY_PROFIT_TARGET_OVERRIDE"])
+            if os.environ.get("DAILY_PROFIT_TARGET_OVERRIDE", "").strip()
+            else compute_daily_profit_target(margin_capital)
         ),
         # per_stock_stop_loss intentionally NOT wired in as a live default -- tested against
         # today's actual trades (2026-08-28) and it would have cut STARCEMENT right before

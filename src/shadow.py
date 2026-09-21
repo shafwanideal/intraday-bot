@@ -26,6 +26,7 @@ from .strategy import (
     SQUARE_OFF_TIME,
     TRAIL_STOP,
     GridEngine,
+    compute_daily_profit_target,
     compute_portfolio_profit_lock_trigger,
 )
 
@@ -195,9 +196,8 @@ def run_shadow(poll_interval: int = POLL_INTERVAL_SECONDS) -> None:
         # see live.py's identical comment on check_portfolio_profit_lock.
         portfolio_profit_lock_trigger=compute_portfolio_profit_lock_trigger(margin_capital),
         portfolio_profit_lock_fixed=True,
-        # daily_profit_target intentionally NOT a standing default -- see live.py's
-        # identical comment (backtest against real past days showed a net cost, not a
-        # net benefit; reverted 2026-09-18 per explicit request).
+        # Re-enabled 2026-09-21 -- see live.py's identical comment.
+        daily_profit_target=compute_daily_profit_target(margin_capital),
         # per_stock_stop_loss intentionally NOT wired in as a live default -- see live.py.
     )
     entered_today: set[str] = set()
@@ -315,6 +315,9 @@ def run_shadow(poll_interval: int = POLL_INTERVAL_SECONDS) -> None:
 
             for result in engine.check_loss_cap(current_prices, _now()):
                 logger.event("daily_loss_cap", **result)
+
+            for result in engine.check_daily_profit_target(current_prices, _now()):
+                logger.event("daily_profit_target", **result)
 
             for result in engine.check_per_stock_stop_loss(current_prices, _now()):
                 logger.event("per_stock_stop_loss", **result)
