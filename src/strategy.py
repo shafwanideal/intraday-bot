@@ -65,6 +65,12 @@ PROFIT_EXIT = True  # restored 2026-09-11 alongside TRAIL_STOP above, for the sa
 # square-off as long as the total account P&L stays above -3,000.
 GRID_PCT = 0.015  # revised from 2% on 2026-08-25 -- see grid_pct_and_costs memory for the backtest comparison
 # Trailing-stop/target activation threshold -- GRID_PCT above.
+TRAILING_ACTIVATION_PCT = 0.01  # lowered from GRID_PCT (1.5%) on 2026-09-22 -- real case,
+# HDFCBANK moved +1.08% and reversed back near breakeven the same day without the trailing
+# stop ever arming, since it never reached 1.5%. At 1%, the same move would have armed
+# protection and locked in a real gain instead of giving the whole move back. trail_pct
+# (how far behind the peak it trails once armed, 0.75% by default) is unchanged -- this
+# only controls how SOON protection turns on, not how much room it gives afterward.
 AVERAGING_PCT = 0.01  # split off from GRID_PCT on 2026-08-26: averaging now fires on a smaller
 # adverse move (1%) than the profit side needs to arm trailing (1.5%) -- previously both used
 # the same GRID_PCT value.

@@ -22,6 +22,7 @@ from .strategy import (
     PROFIT_EXIT,
     SQUARE_OFF_TIME,
     TRAIL_STOP,
+    TRAILING_ACTIVATION_PCT,
     GridEngine,
     Position,
     compute_daily_profit_target,
@@ -682,6 +683,9 @@ def run_live(
         averaging_pct=AVERAGING_PCT,
         enable_averaging=ENABLE_AVERAGING,
         trail_stop=TRAIL_STOP,
+        # Lowered from GRID_PCT (1.5%) 2026-09-22 -- see TRAILING_ACTIVATION_PCT's own
+        # comment. trail_pct (the 0.75% gap once armed) is left at its default, unchanged.
+        trailing_activation_pct=TRAILING_ACTIVATION_PCT,
         profit_exit=PROFIT_EXIT,
         # PORTFOLIO_PROFIT_LOCK_TRIGGER_OVERRIDE (env var, not .env -- a deliberate
         # one-time choice per session start, same pattern as FRESH_LOSS_BUDGET) lets

@@ -25,6 +25,7 @@ from .strategy import (
     PROFIT_EXIT,
     SQUARE_OFF_TIME,
     TRAIL_STOP,
+    TRAILING_ACTIVATION_PCT,
     GridEngine,
     compute_daily_profit_target,
     compute_portfolio_profit_lock_trigger,
@@ -190,6 +191,9 @@ def run_shadow(poll_interval: int = POLL_INTERVAL_SECONDS) -> None:
         averaging_pct=AVERAGING_PCT,
         enable_averaging=ENABLE_AVERAGING,
         trail_stop=TRAIL_STOP,
+        # Lowered from GRID_PCT (1.5%) 2026-09-22 -- see live.py's identical wiring and
+        # TRAILING_ACTIVATION_PCT's own comment in strategy.py.
+        trailing_activation_pct=TRAILING_ACTIVATION_PCT,
         profit_exit=PROFIT_EXIT,
         # 2.667% of the day's real margin_capital, not a fixed rupee figure -- see
         # compute_portfolio_profit_lock_trigger. fixed=True: pinned floor, no ratchet --
