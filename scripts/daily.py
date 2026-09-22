@@ -15,6 +15,7 @@ or run it with no argument and it will ask for them instead.
 """
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -30,7 +31,20 @@ ENV_FILE = PROJECT_ROOT / ".env"
 
 
 def set_live_trading_enabled(value: bool) -> None:
-    """Add or update the LIVE_TRADING_ENABLED line in .env in place."""
+    """Add or update the LIVE_TRADING_ENABLED line in .env in place.
+
+    Also sets it directly in THIS process's os.environ, not just the file --
+    run_live.py's own config.py calls load_dotenv() with the library default
+    (override=False), which only fills in variables NOT already present in
+    os.environ. Since this process already imported src.live/src.config above
+    (which ran load_dotenv() and cached whatever the file said BEFORE this
+    function's edit -- almost always "false", left over from the previous
+    day's run), the subprocess.run() below would otherwise inherit that
+    stale cached value from this process's environment and never see the
+    fresh "true" just written to the file. Real bug, 2026-09-22: this exact
+    mismatch made run_live.py raise "LIVE_TRADING_ENABLED is not set to
+    'true'" immediately after this function had, in fact, just set it.
+    """
     new_line = f"LIVE_TRADING_ENABLED={'true' if value else 'false'}"
     lines = ENV_FILE.read_text().splitlines() if ENV_FILE.exists() else []
     for i, line in enumerate(lines):
@@ -40,6 +54,7 @@ def set_live_trading_enabled(value: bool) -> None:
     else:
         lines.append(new_line)
     ENV_FILE.write_text("\n".join(lines) + "\n")
+    os.environ["LIVE_TRADING_ENABLED"] = "true" if value else "false"
 
 
 def main() -> None:
