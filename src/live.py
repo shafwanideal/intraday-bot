@@ -23,6 +23,8 @@ from .strategy import (
     SQUARE_OFF_TIME,
     TRAIL_STOP,
     TRAILING_ACTIVATION_PCT,
+    TRAILING_ACTIVATION_PCT_AFTER_NOON,
+    TRAILING_ACTIVATION_CUTOVER_TIME,
     GridEngine,
     Position,
     compute_daily_profit_target,
@@ -686,6 +688,11 @@ def run_live(
         # Lowered from GRID_PCT (1.5%) 2026-09-22 -- see TRAILING_ACTIVATION_PCT's own
         # comment. trail_pct (the 0.75% gap once armed) is left at its default, unchanged.
         trailing_activation_pct=TRAILING_ACTIVATION_PCT,
+        # 2026-09-23: from 12:00 IST onward, a not-yet-armed position needs only a 0.5%
+        # favorable move to arm trailing, instead of the full 1%. See
+        # TRAILING_ACTIVATION_PCT_AFTER_NOON's own comment for why.
+        trailing_activation_pct_after=TRAILING_ACTIVATION_PCT_AFTER_NOON,
+        trailing_activation_cutover_time=TRAILING_ACTIVATION_CUTOVER_TIME,
         profit_exit=PROFIT_EXIT,
         # PORTFOLIO_PROFIT_LOCK_TRIGGER_OVERRIDE (env var, not .env -- a deliberate
         # one-time choice per session start, same pattern as FRESH_LOSS_BUDGET) lets

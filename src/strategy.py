@@ -71,6 +71,14 @@ TRAILING_ACTIVATION_PCT = 0.01  # lowered from GRID_PCT (1.5%) on 2026-09-22 -- 
 # protection and locked in a real gain instead of giving the whole move back. trail_pct
 # (how far behind the peak it trails once armed, 0.75% by default) is unchanged -- this
 # only controls how SOON protection turns on, not how much room it gives afterward.
+TRAILING_ACTIVATION_PCT_AFTER_NOON = 0.005  # added 2026-09-23: tighten the arm threshold
+# to 0.5% from 12:00 IST onward. A position that entered (or is still riding, unarmed)
+# in the afternoon has less of the day's move left ahead of it than one that entered at
+# the open, so waiting for the full 1% move before arming protection gives back more of
+# whatever afternoon gain there is. Only affects positions that haven't armed yet at the
+# moment of the check -- a position already trailing before noon keeps the activation pct
+# (and therefore the lock-in floor) it originally armed at; see Position.armed_activation_pct.
+TRAILING_ACTIVATION_CUTOVER_TIME = time(12, 0)  # IST
 AVERAGING_PCT = 0.01  # split off from GRID_PCT on 2026-08-26: averaging now fires on a smaller
 # adverse move (1%) than the profit side needs to arm trailing (1.5%) -- previously both used
 # the same GRID_PCT value.
@@ -207,6 +215,10 @@ class Position:
     peak_price: float | None = None  # best favorable price seen once trailing has started
     atr: float | None = None  # this symbol's ATR at entry, if using volatility-based trailing
     trailing_activated_at: object = None  # timestamp trailing started, for the grace period
+    armed_activation_pct: float | None = None  # the trailing_activation_pct in effect at the
+    # moment THIS position armed -- fixed at arm time so a later time-based threshold change
+    # (see TRAILING_ACTIVATION_PCT_AFTER_NOON) doesn't retroactively move an already-armed
+    # position's lock-in floor.
 
     @property
     def qty(self) -> float:
@@ -261,6 +273,8 @@ class GridEngine:
         max_concurrent_positions: int = MAX_CONCURRENT_POSITIONS,
         averaging_pct: float | None = None,
         trailing_activation_pct: float | None = None,
+        trailing_activation_pct_after: float | None = None,
+        trailing_activation_cutover_time: time | None = None,
         enable_averaging: bool = True,
         per_stock_stop_loss: float | None = None,
         portfolio_profit_lock_trigger: float | None = None,
@@ -276,6 +290,12 @@ class GridEngine:
         # keep their exact prior behavior. Separate from grid_pct so trailing can be tested
         # at a lower activation threshold without touching the profit-lock floor's meaning.
         self.trailing_activation_pct = trailing_activation_pct if trailing_activation_pct is not None else grid_pct
+        # Both None (the default) means no time-based change -- trailing_activation_pct applies
+        # all day, unchanged from before this was added. Setting trailing_activation_pct_after
+        # switches the arm threshold to that value from trailing_activation_cutover_time onward,
+        # for positions that haven't armed yet -- see _trailing_activation_pct_at.
+        self.trailing_activation_pct_after = trailing_activation_pct_after
+        self.trailing_activation_cutover_time = trailing_activation_cutover_time
         self.enable_averaging = enable_averaging
         self.apply_costs = apply_costs
         self.margin_capital = margin_capital
@@ -374,6 +394,16 @@ class GridEngine:
         self.trade_log.append(entry)
         return entry
 
+    def _trailing_activation_pct_at(self, timestamp) -> float:
+        """The arm threshold in effect for a NOT-YET-armed position at this
+        timestamp -- self.trailing_activation_pct all day, unless
+        trailing_activation_pct_after/cutover_time are set and timestamp has
+        reached the cutover, in which case the (tighter) after-cutover value."""
+        if self.trailing_activation_pct_after is not None and self.trailing_activation_cutover_time is not None:
+            if timestamp.time() >= self.trailing_activation_cutover_time:
+                return self.trailing_activation_pct_after
+        return self.trailing_activation_pct
+
     def update(self, symbol: str, price: float, timestamp) -> dict | None:
         """Check target-exit / trailing-stop / averaging for one open position
         at the current price."""
@@ -389,11 +419,15 @@ class GridEngine:
             # position was genuinely up grid_pct at some point. lock_price is the
             # floor that prevents that -- once armed, the effective stop can only
             # ratchet UP toward the peak, never back down past the level that
-            # locks in the original grid_pct move.
+            # locks in the original grid_pct move. Uses the activation pct THIS
+            # position actually armed at (armed_activation_pct), not whatever
+            # is current now -- a later time-based threshold change must not
+            # retroactively move an already-armed position's floor.
+            activation_pct = pos.armed_activation_pct if pos.armed_activation_pct is not None else self.trailing_activation_pct
             lock_price = (
-                pos.avg_price * (1 + self.trailing_activation_pct)
+                pos.avg_price * (1 + activation_pct)
                 if pos.direction == "long"
-                else pos.avg_price * (1 - self.trailing_activation_pct)
+                else pos.avg_price * (1 - activation_pct)
             )
             if pos.direction == "long":
                 pos.peak_price = max(pos.peak_price, price)
@@ -422,12 +456,14 @@ class GridEngine:
         # the position rides until square_off, daily_loss_cap, per_stock_stop_loss,
         # or portfolio_profit_lock closes it. Nothing takes profit on its own.
         if self.profit_exit:
-            arm_threshold = self.trailing_activation_pct if self.trail_stop else self.grid_pct
+            current_activation_pct = self._trailing_activation_pct_at(timestamp)
+            arm_threshold = current_activation_pct if self.trail_stop else self.grid_pct
             if move >= arm_threshold:
                 if self.trail_stop:
                     pos.trailing = True
                     pos.peak_price = price
                     pos.trailing_activated_at = timestamp
+                    pos.armed_activation_pct = current_activation_pct
                     return None
                 return self._close(symbol, price, "target_exit", timestamp)
 
