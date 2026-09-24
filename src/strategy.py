@@ -72,13 +72,17 @@ TRAILING_ACTIVATION_PCT = 0.01  # lowered from GRID_PCT (1.5%) on 2026-09-22 -- 
 # (how far behind the peak it trails once armed, 0.75% by default) is unchanged -- this
 # only controls how SOON protection turns on, not how much room it gives afterward.
 TRAILING_ACTIVATION_PCT_AFTER_NOON = 0.005  # added 2026-09-23: tighten the arm threshold
-# to 0.5% from 12:00 IST onward. A position that entered (or is still riding, unarmed)
-# in the afternoon has less of the day's move left ahead of it than one that entered at
-# the open, so waiting for the full 1% move before arming protection gives back more of
-# whatever afternoon gain there is. Only affects positions that haven't armed yet at the
-# moment of the check -- a position already trailing before noon keeps the activation pct
-# (and therefore the lock-in floor) it originally armed at; see Position.armed_activation_pct.
-TRAILING_ACTIVATION_CUTOVER_TIME = time(12, 0)  # IST
+# to 0.5% from TRAILING_ACTIVATION_CUTOVER_TIME onward. A position that entered (or is
+# still riding, unarmed) later in the day has less of the day's move left ahead of it than
+# one that entered at the open, so waiting for the full 1% move before arming protection
+# gives back more of whatever gain there is. Only affects positions that haven't armed yet
+# at the moment of the check -- a position already trailing before the cutover keeps the
+# activation pct (and therefore the lock-in floor) it originally armed at; see
+# Position.armed_activation_pct. Name kept as "_AFTER_NOON" even though the cutover itself
+# moved to 11:00 on 2026-09-24 -- it's still describing "the tighter afternoon-side value",
+# not literally noon; renaming it isn't worth touching every call site over.
+TRAILING_ACTIVATION_CUTOVER_TIME = time(11, 0)  # IST -- moved earlier from 12:00 on
+# 2026-09-24 (explicit request): "after 11 am not 12".
 AVERAGING_PCT = 0.01  # split off from GRID_PCT on 2026-08-26: averaging now fires on a smaller
 # adverse move (1%) than the profit side needs to arm trailing (1.5%) -- previously both used
 # the same GRID_PCT value.
