@@ -201,9 +201,10 @@ def run_shadow(poll_interval: int = POLL_INTERVAL_SECONDS) -> None:
         trailing_activation_pct_after=TRAILING_ACTIVATION_PCT_AFTER_NOON,
         trailing_activation_cutover_time=TRAILING_ACTIVATION_CUTOVER_TIME,
         profit_exit=PROFIT_EXIT,
-        # 2.667% of the day's real margin_capital, not a fixed rupee figure -- see
-        # compute_portfolio_profit_lock_trigger. fixed=True: pinned floor, no ratchet --
-        # see live.py's identical comment on check_portfolio_profit_lock.
+        # 2% of the day's real margin_capital (lowered from 2.667% on 2026-10-01, explicit
+        # request), not a fixed rupee figure -- see compute_portfolio_profit_lock_trigger.
+        # fixed=True: pinned floor, no ratchet -- see live.py's identical comment on
+        # check_portfolio_profit_lock.
         portfolio_profit_lock_trigger=compute_portfolio_profit_lock_trigger(margin_capital),
         portfolio_profit_lock_fixed=True,
         # Re-enabled 2026-09-21 -- see live.py's identical comment.

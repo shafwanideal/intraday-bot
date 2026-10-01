@@ -698,9 +698,9 @@ def run_live(
         # one-time choice per session start, same pattern as FRESH_LOSS_BUDGET) lets
         # today's floor be set to something other than the standing default without
         # editing strategy.py -- requested 2026-09-02 ("change today's floor as 500
-        # total P&L"). The standing default itself is now 2.667% of the day's REAL
-        # margin_capital (2026-09-13 spec), not a fixed rupee figure -- see
-        # compute_portfolio_profit_lock_trigger.
+        # total P&L"). The standing default itself is 2% of the day's REAL margin_capital
+        # (lowered from 2.667% on 2026-10-01, explicit request), not a fixed rupee figure --
+        # see compute_portfolio_profit_lock_trigger.
         portfolio_profit_lock_trigger=(
             float(os.environ["PORTFOLIO_PROFIT_LOCK_TRIGGER_OVERRIDE"])
             if os.environ.get("PORTFOLIO_PROFIT_LOCK_TRIGGER_OVERRIDE", "").strip()
@@ -716,8 +716,9 @@ def run_live(
         # ran well past Rs 4,000). Re-confirmed the tradeoff with the user before this
         # change: it can give up upside on a day that keeps climbing, in exchange for
         # locking in the win immediately rather than risking a reversal. Standing
-        # default is 5.33% of margin_capital (Rs 4,000 on Rs 75,000); still overridable
-        # for one day via DAILY_PROFIT_TARGET_OVERRIDE.
+        # default is 4% of margin_capital (lowered from 5.33% on 2026-10-01, explicit
+        # request -- Rs 4,000 on Rs 1,00,000); still overridable for one day via
+        # DAILY_PROFIT_TARGET_OVERRIDE.
         daily_profit_target=(
             float(os.environ["DAILY_PROFIT_TARGET_OVERRIDE"])
             if os.environ.get("DAILY_PROFIT_TARGET_OVERRIDE", "").strip()

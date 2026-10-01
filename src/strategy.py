@@ -125,20 +125,22 @@ def compute_daily_loss_cap(margin_capital: float) -> float:
 PORTFOLIO_PROFIT_LOCK_TRIGGER = 3000  # DEFAULT/fallback only, at MARGIN_CAPITAL --
 # live.py/shadow.py compute the real trigger fresh each day via
 # compute_portfolio_profit_lock_trigger(actual margin_capital).
-PORTFOLIO_PROFIT_LOCK_TRIGGER_PCT = 0.02667  # 2026-09-13: the layered-trailing-stop
-# spec calls for the profit floor to arm at 2.667% of the day's fund (e.g. Rs 2,000 on
-# Rs 75,000), not a fixed rupee figure that stays Rs 3,000 regardless of capital.
+PORTFOLIO_PROFIT_LOCK_TRIGGER_PCT = 0.02  # lowered from 0.02667 on 2026-10-01 (explicit
+# request): wants a clean Rs 2,000 floor at Rs 1,00,000 capital, not Rs 2,667. Still scales
+# with margin_capital rather than being a fixed rupee figure.
 
 
 def compute_portfolio_profit_lock_trigger(margin_capital: float) -> float:
-    """Straight PORTFOLIO_PROFIT_LOCK_TRIGGER_PCT (2.667%) of the day's actual fund."""
+    """Straight PORTFOLIO_PROFIT_LOCK_TRIGGER_PCT (2%) of the day's actual fund."""
     return PORTFOLIO_PROFIT_LOCK_TRIGGER_PCT * margin_capital
 
 
-DAILY_PROFIT_TARGET_PCT = 0.0533  # 2026-09-18 request: a hard daily take-profit ceiling,
-# on top of (not instead of) the portfolio profit lock above. Same 2.667%-on-Rs-75,000
-# ratio as the other two (Rs 4,000 on Rs 75,000), scaling with margin_capital rather than
-# staying a fixed rupee figure that goes stale as capital changes.
+DAILY_PROFIT_TARGET_PCT = 0.04  # lowered from 0.0533 on 2026-10-01 (explicit request):
+# wants a clean Rs 4,000 target at Rs 1,00,000 capital, not Rs 5,330. Still scales with
+# margin_capital rather than being a fixed rupee figure.
+#
+# Originally 2026-09-18 request: a hard daily take-profit ceiling, on top of (not instead
+# of) the portfolio profit lock above.
 #
 # Distinct from portfolio_profit_lock: that one only fires on the way back DOWN once
 # armed (it never caps the upside on its own -- see check_portfolio_profit_lock's
@@ -153,7 +155,7 @@ DAILY_PROFIT_TARGET_PCT = 0.0533  # 2026-09-18 request: a hard daily take-profit
 
 
 def compute_daily_profit_target(margin_capital: float) -> float:
-    """Straight DAILY_PROFIT_TARGET_PCT (5.33%) of the day's actual fund."""
+    """Straight DAILY_PROFIT_TARGET_PCT (4%) of the day's actual fund."""
     return DAILY_PROFIT_TARGET_PCT * margin_capital
 
 
