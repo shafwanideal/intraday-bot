@@ -599,10 +599,11 @@ def run_live(
     confirm_fn=None,
     notifier=None,
     should_stop=None,
+    protect_only: bool = False,
 ) -> None:
     """Trade the grid strategy with REAL orders against today's plan.
 
-    Safety gates, all of which must pass before a single order is placed:
+    Safety gates, all of which must pass before a single NEW entry is placed:
     1. LIVE_TRADING_ENABLED=true must be explicitly set in .env.
     2. The user must type an exact confirmation phrase interactively.
 
@@ -618,6 +619,20 @@ def run_live(
     - should_stop() -> bool, polled each cycle, squares off everything and
       ends the session. This is the panic button: it closes positions, it
       does not abandon them.
+
+    protect_only=True (added 2026-10-06, after a session crashed silently at
+    09:16 AM and left real positions with zero trailing-stop/loss-cap/target
+    monitoring for ~5 hours before anyone noticed): reconciles whatever is
+    ALREADY open on Kite and resumes every exit-side protection on it
+    (trailing stop, per-stock stop loss, daily loss cap, daily profit target,
+    portfolio profit lock, square-off) exactly as normal, but places NO new
+    entries at all -- the entry block below is skipped entirely regardless of
+    what's still unfilled in today's plan -- and skips gate 2 (no CONFIRM
+    prompt, auto-proceeds). This is safe to automate unattended specifically
+    BECAUSE it can only ever place protective EXIT orders against positions
+    that already exist; it can never open a new real position a human hasn't
+    seen. This is the mode scripts/watchdog.py restarts into after an
+    unexpected crash -- see that script for the crash-detection logic.
 
     Entries use check-then-place-then-commit: GridEngine.can_enter() is a
     pure query, so we place the real order first and only record the
@@ -777,13 +792,25 @@ def run_live(
     _reconcile_open_positions(kite, engine, symbol_atr, real_qty, entered_today, logger)
 
     summary = build_plan_summary(plan, engine, premarket_symbols, tranche_a_exposure, tranche_b_exposure, allocations)
-    approved = _confirm_or_abort(summary) if confirm_fn is None else confirm_fn(summary)
+    if protect_only:
+        # No human to type CONFIRM, and none needed -- see protect_only's own
+        # docstring paragraph above for why this is safe: this mode can only
+        # ever place protective exits, never a new entry.
+        approved = True
+        logger.event("protect_only_auto_approved", open_positions=list(engine.open_positions.keys()))
+    else:
+        approved = _confirm_or_abort(summary) if confirm_fn is None else confirm_fn(summary)
     if not approved:
         logger.event("confirmation_declined")
         return
 
     logger.event(
-        "start", plan=plan, grid_pct=engine.grid_pct, exposure_per_unit=engine.exposure_per_unit, symbol_atr=symbol_atr
+        "start",
+        plan=plan,
+        grid_pct=engine.grid_pct,
+        exposure_per_unit=engine.exposure_per_unit,
+        symbol_atr=symbol_atr,
+        protect_only=protect_only,
     )
 
     def place_and_confirm(
@@ -1036,7 +1063,8 @@ def run_live(
                 current_prices[symbol] = quote["last_price"]
 
                 if (
-                    not stopping
+                    not protect_only
+                    and not stopping
                     and symbol in plan
                     and symbol not in entered_today
                     and symbol not in pending_preopen

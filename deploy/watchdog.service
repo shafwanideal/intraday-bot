@@ -1,0 +1,55 @@
+# Watchdog for the live trading process -- detects an unexpected crash of
+# run_live.py (started manually each morning via bot-morning/daily.py) and
+# restarts it in a restricted protect-only mode that resumes trailing-stop/
+# loss-cap/profit-target protection on existing positions without placing
+# any new entries. See scripts/watchdog.py's own docstring for the full
+# reasoning. This service is separate from run_live.py itself: it should
+# always be running, independent of whether a live session is active today.
+#
+# Install on the Contabo box:
+#   sudo cp deploy/watchdog.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now watchdog
+#
+# Adjust User= and the paths below if the checkout isn't at
+# /home/trader/intraday-bot.
+
+[Unit]
+Description=Watchdog for the intraday live trading process
+After=network-online.target
+Wants=network-online.target
+
+# Crash-loop limiter for the watchdog PROCESS ITSELF (not its restart budget
+# for run_live.py, which is MAX_RESTARTS_PER_DAY inside the script). If the
+# watchdog itself keeps dying, that should surface loudly too.
+StartLimitBurst=5
+StartLimitIntervalSec=300
+
+[Service]
+Type=simple
+User=trader
+WorkingDirectory=/home/trader/intraday-bot
+ExecStart=/home/trader/intraday-bot/.venv/bin/python3 scripts/watchdog.py
+
+Restart=on-failure
+RestartSec=15
+
+Environment=PYTHONUNBUFFERED=1
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=watchdog
+
+# Hardening -- same posture as intraday-bot.service. This process can launch
+# run_live.py, which holds Kite credentials and places real orders.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/trader/intraday-bot
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+
+[Install]
+WantedBy=multi-user.target
