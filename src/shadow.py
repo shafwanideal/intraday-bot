@@ -64,7 +64,12 @@ def _fetch_margin_capital(kite) -> float:
     available cash), not the fixed default -- otherwise shadow-mode P&L
     isn't a realistic preview of what a live session would actually do."""
     try:
-        cash = kite.margins()["equity"]["available"]["cash"]
+        available = kite.margins()["equity"]["available"]
+        # "cash" is only the opening balance; money added today via UPI/IMPS
+        # shows up separately as intraday_payin (Kite's own "Margin available"
+        # counts both). Real case 2026-10-05: cash was Rs 220.80 with Rs 63.6k
+        # paid in that morning, so the whole day sized off Rs 220.
+        cash = available["cash"] + available.get("intraday_payin", 0)
         return float(cash)
     except (KeyError, TypeError, *POLL_EXCEPTIONS) as exc:
         print(f"WARNING: could not fetch live margin balance ({exc}); falling back to default Rs {MARGIN_CAPITAL:,}")
