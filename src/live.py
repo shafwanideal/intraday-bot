@@ -27,6 +27,7 @@ from .strategy import (
     TRAILING_ACTIVATION_CUTOVER_TIME,
     GridEngine,
     Position,
+    compute_daily_loss_cap,
     compute_daily_profit_target,
     compute_portfolio_profit_lock_trigger,
     pnl,
@@ -520,6 +521,59 @@ def _detect_manual_closes(kite, engine: GridEngine, real_qty: dict[str, int], lo
             real_qty.pop(symbol, None)
 
 
+def _rescale_protections_to_deployed_capital(
+    engine: GridEngine, deployed_capital: float, loss_cap_extension: float, logger: "LiveLogger"
+) -> None:
+    """Replaces the loss cap / profit target / portfolio profit lock trigger
+    -- all originally sized off the day's FULL margin_capital when the engine
+    was constructed -- with the same percentages applied to deployed_capital
+    instead: the capital actually committed to positions that filled, not
+    what was merely planned for the day's premarket batch.
+
+    Added 2026-10-08, real case: 3 of 4 planned picks (25% each on Rs 1 lakh)
+    got rejected and only one filled, but the loss cap/target/floor were
+    still sized as if all Rs 1,00,000 were at risk -- letting the one real
+    position swing roughly 4x further than the intended % before anything
+    reacted, since the thresholds didn't know most of the planned capital
+    was never actually deployed.
+
+    Called exactly once, right after every symbol in the day's premarket
+    batch has been attempted (filled or rejected) -- see the call site in
+    run_live(). Never touches a threshold the user explicitly overrode for
+    today (the *_OVERRIDE env vars) -- an explicit one-time rupee figure is
+    a deliberate choice unrelated to how much capital ended up deployed.
+    loss_cap_extension preserves any FRESH_LOSS_BUDGET adjustment applied
+    earlier in this same session, which this must not silently erase."""
+    old = {
+        "daily_loss_cap": engine.daily_loss_cap,
+        "daily_profit_target": engine.daily_profit_target,
+        "portfolio_profit_lock_trigger": engine.portfolio_profit_lock_trigger,
+    }
+    engine.daily_loss_cap = compute_daily_loss_cap(deployed_capital) + loss_cap_extension
+    if not os.environ.get("DAILY_PROFIT_TARGET_OVERRIDE", "").strip():
+        engine.daily_profit_target = compute_daily_profit_target(deployed_capital)
+    if not os.environ.get("PORTFOLIO_PROFIT_LOCK_TRIGGER_OVERRIDE", "").strip():
+        engine.portfolio_profit_lock_trigger = compute_portfolio_profit_lock_trigger(deployed_capital)
+    logger.event(
+        "protections_rescaled_to_deployed_capital",
+        deployed_capital=round(deployed_capital, 2),
+        old={k: (round(v, 2) if v is not None else None) for k, v in old.items()},
+        new={
+            "daily_loss_cap": round(engine.daily_loss_cap, 2),
+            "daily_profit_target": round(engine.daily_profit_target, 2) if engine.daily_profit_target is not None else None,
+            "portfolio_profit_lock_trigger": (
+                round(engine.portfolio_profit_lock_trigger, 2) if engine.portfolio_profit_lock_trigger is not None else None
+            ),
+        },
+    )
+    print(
+        f"Rs {deployed_capital:,.2f} actually deployed (not the full margin capital) -- "
+        f"loss cap/target/floor rescaled: {old['daily_loss_cap']:,.2f} -> {engine.daily_loss_cap:,.2f} / "
+        f"{old['daily_profit_target']:,.2f} -> {engine.daily_profit_target:,.2f} / "
+        f"{old['portfolio_profit_lock_trigger']:,.2f} -> {engine.portfolio_profit_lock_trigger:,.2f}"
+    )
+
+
 def build_plan_summary(
     plan: dict[str, str],
     engine: GridEngine,
@@ -777,11 +831,16 @@ def run_live(
     # fresh cap-sized budget counted only from new trades onward. Does NOT erase the
     # already-realized loss -- it's still real money lost -- it only stops the cap from
     # immediately re-triggering on trades placed after this point.
+    # Carried forward into _rescale_protections_to_deployed_capital below, so a
+    # later rescale (once the premarket batch resolves) doesn't silently erase
+    # this extension by recomputing daily_loss_cap from scratch.
+    loss_cap_extension = 0.0
     if os.environ.get("FRESH_LOSS_BUDGET", "").strip().lower() == "true":
         already_lost = max(0.0, -engine.daily_pnl)
         if already_lost > 0:
             old_cap = engine.daily_loss_cap
             engine.daily_loss_cap += already_lost
+            loss_cap_extension = already_lost
             logger.event(
                 "fresh_loss_budget_applied",
                 already_realized_loss=round(already_lost, 2),
@@ -795,6 +854,19 @@ def run_live(
             )
 
     _reconcile_open_positions(kite, engine, symbol_atr, real_qty, entered_today, logger)
+
+    # Scales the loss cap/profit target/portfolio floor down to whatever capital
+    # ACTUALLY ends up deployed in today's premarket batch, instead of leaving
+    # them sized for the full planned capital when some picks get rejected --
+    # see _rescale_protections_to_deployed_capital's own docstring. Only engages
+    # when there IS a premarket batch to wait for; a mid-day restart (no
+    # premarket_symbols) or protect_only leaves the engine's existing thresholds
+    # untouched, unchanged from before this feature existed.
+    rescale_enabled = bool(premarket_symbols)
+    premarket_resolved = not premarket_symbols
+    deployed_capital = sum(
+        sum(price * qty for price, qty in pos.legs) for pos in engine.open_positions.values()
+    ) / LEVERAGE
 
     summary = build_plan_summary(plan, engine, premarket_symbols, tranche_a_exposure, tranche_b_exposure, allocations)
     if protect_only:
@@ -1051,6 +1123,7 @@ def run_live(
                         )
                         real_qty[symbol] = filled_qty
                         entered_today.add(symbol)
+                        deployed_capital += (result["average_price"] * filled_qty) / LEVERAGE
                         logger.event(
                             "entry",
                             symbol=symbol,
@@ -1141,12 +1214,22 @@ def run_live(
                                 symbol, result["average_price"], direction, _now(), atr=symbol_atr.get(symbol), quantity=filled_qty
                             )
                             real_qty[symbol] = filled_qty
+                            deployed_capital += (result["average_price"] * filled_qty) / LEVERAGE
                             logger.event("entry", symbol=symbol, direction=direction, price=result["average_price"], quantity=filled_qty)
                         else:
                             logger.event("entry_failed", symbol=symbol, direction=direction, quantity=quantity, result=result)
                     # else: PREOPEN_ORDER_CUTOFF <= now < MARKET_OPEN -- the pre-open
                     # window has closed and auction matching is in progress; wait for
                     # the resolution pass above once MARKET_OPEN arrives.
+
+            if (
+                rescale_enabled
+                and not premarket_resolved
+                and not pending_preopen
+                and premarket_symbols.issubset(entered_today)
+            ):
+                premarket_resolved = True
+                _rescale_protections_to_deployed_capital(engine, deployed_capital, loss_cap_extension, logger)
 
             # Log the exact prices this poll is about to act on, for open positions
             # specifically -- without this, reconstructing what actually happened
