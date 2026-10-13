@@ -105,6 +105,43 @@ def place_market_order(
         ) from exc
 
 
+def place_delivery_order(
+    kite: KiteConnect, symbol: str, transaction_type: str, quantity: int, reference_price: float, tag: str | None = None
+) -> str:
+    """Place a real equity DELIVERY (CNC) MARKET order -- the swing-trading
+    counterpart to place_market_order's MIS order. Same AUTO market-protection
+    band, same exception contract (OrderRejected vs OrderPlacementAmbiguous),
+    same 20-char tag guard -- everything about placing and confirming the
+    order is identical to MIS; only `product` differs. See src/swing_live.py
+    for how this is actually wired into live trading.
+    """
+    if tag is not None and len(tag) > 20:
+        raise ValueError(f"Order tag {tag!r} is {len(tag)} chars, over Kite's 20-char limit -- Kite would reject this order.")
+    try:
+        return kite.place_order(
+            variety=kite.VARIETY_REGULAR,
+            exchange=kite.EXCHANGE_NSE,
+            tradingsymbol=symbol,
+            transaction_type=transaction_type,
+            quantity=quantity,
+            product=kite.PRODUCT_CNC,
+            order_type=kite.ORDER_TYPE_MARKET,
+            market_protection=MARKET_PROTECTION_AUTO,
+            tag=tag,
+        )
+    except KiteException as exc:
+        raise OrderRejected(f"place_order({symbol}, {transaction_type}, qty={quantity}, CNC) was rejected by Kite: {exc}") from exc
+    except AMBIGUOUS_EXCEPTIONS as exc:
+        order_id = _find_recent_matching_order(kite, symbol, transaction_type, quantity, tag)
+        if order_id:
+            return order_id
+        raise OrderPlacementAmbiguous(
+            f"place_order({symbol}, {transaction_type}, qty={quantity}, CNC) failed ({exc!r}) and no matching "
+            "order was found in kite.orders() -- whether this reached the exchange is unknown. "
+            "Check Kite directly before placing anything else for this symbol."
+        ) from exc
+
+
 def _find_recent_matching_order(
     kite: KiteConnect, symbol: str, transaction_type: str, quantity: int, tag: str | None
 ) -> str | None:
