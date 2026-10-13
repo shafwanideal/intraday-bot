@@ -105,16 +105,21 @@ def place_market_order(
         ) from exc
 
 
-def place_delivery_order(
-    kite: KiteConnect, symbol: str, transaction_type: str, quantity: int, reference_price: float, tag: str | None = None
+def _place_product_order(
+    kite: KiteConnect,
+    symbol: str,
+    transaction_type: str,
+    quantity: int,
+    product: str,
+    product_label: str,
+    tag: str | None = None,
 ) -> str:
-    """Place a real equity DELIVERY (CNC) MARKET order -- the swing-trading
-    counterpart to place_market_order's MIS order. Same AUTO market-protection
-    band, same exception contract (OrderRejected vs OrderPlacementAmbiguous),
-    same 20-char tag guard -- everything about placing and confirming the
-    order is identical to MIS; only `product` differs. See src/swing_live.py
-    for how this is actually wired into live trading.
-    """
+    """Shared body for place_market_order/place_delivery_order/place_mtf_order --
+    only `product` (and the label used in error messages) differs between
+    them. Same AUTO market-protection band, same exception contract
+    (OrderRejected vs OrderPlacementAmbiguous), same 20-char tag guard for
+    all three; see place_market_order's own docstring for why each of those
+    exists."""
     if tag is not None and len(tag) > 20:
         raise ValueError(f"Order tag {tag!r} is {len(tag)} chars, over Kite's 20-char limit -- Kite would reject this order.")
     try:
@@ -124,22 +129,55 @@ def place_delivery_order(
             tradingsymbol=symbol,
             transaction_type=transaction_type,
             quantity=quantity,
-            product=kite.PRODUCT_CNC,
+            product=product,
             order_type=kite.ORDER_TYPE_MARKET,
             market_protection=MARKET_PROTECTION_AUTO,
             tag=tag,
         )
     except KiteException as exc:
-        raise OrderRejected(f"place_order({symbol}, {transaction_type}, qty={quantity}, CNC) was rejected by Kite: {exc}") from exc
+        raise OrderRejected(
+            f"place_order({symbol}, {transaction_type}, qty={quantity}, {product_label}) was rejected by Kite: {exc}"
+        ) from exc
     except AMBIGUOUS_EXCEPTIONS as exc:
         order_id = _find_recent_matching_order(kite, symbol, transaction_type, quantity, tag)
         if order_id:
             return order_id
         raise OrderPlacementAmbiguous(
-            f"place_order({symbol}, {transaction_type}, qty={quantity}, CNC) failed ({exc!r}) and no matching "
-            "order was found in kite.orders() -- whether this reached the exchange is unknown. "
+            f"place_order({symbol}, {transaction_type}, qty={quantity}, {product_label}) failed ({exc!r}) and no "
+            "matching order was found in kite.orders() -- whether this reached the exchange is unknown. "
             "Check Kite directly before placing anything else for this symbol."
         ) from exc
+
+
+def place_delivery_order(
+    kite: KiteConnect, symbol: str, transaction_type: str, quantity: int, reference_price: float, tag: str | None = None
+) -> str:
+    """Place a real equity DELIVERY (CNC) MARKET order -- zero leverage, full
+    cash settlement. `reference_price` isn't sent to Kite (a MARKET order
+    carries no price); kept in the signature for symmetry with the other
+    place_*_order functions, whose callers already compute it for sizing."""
+    return _place_product_order(kite, symbol, transaction_type, quantity, kite.PRODUCT_CNC, "CNC", tag=tag)
+
+
+# No named PRODUCT_MTF constant in this pinned kiteconnect version (5.2.2;
+# checked -- only PRODUCT_MIS/CNC/NRML/CO exist) even though Kite's live
+# trading API accepts "MTF" as a product value -- the SDK's constants lag
+# the exchange's own product list. Passing the literal string works exactly
+# the same as kite.PRODUCT_CNC does; update this if a future kiteconnect
+# release adds a real constant.
+PRODUCT_MTF = "MTF"
+
+
+def place_mtf_order(
+    kite: KiteConnect, symbol: str, transaction_type: str, quantity: int, reference_price: float, tag: str | None = None
+) -> str:
+    """Place a real MTF (Margin Trading Facility) MARKET order -- leveraged
+    equity delivery; Zerodha funds part of the position per that stock's own
+    SEBI/broker-set margin %, which this module does not compute or assume
+    (see src/swing_live.py, which only ever calls this for an EXIT against a
+    position the user placed manually -- the actual leverage and entry sizing
+    are the user's decision, made outside this codebase)."""
+    return _place_product_order(kite, symbol, transaction_type, quantity, PRODUCT_MTF, "MTF", tag=tag)
 
 
 def _find_recent_matching_order(
