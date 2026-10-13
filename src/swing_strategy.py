@@ -100,6 +100,38 @@ def mtf_order_cost(value: float, side: str) -> float:
     return brokerage + exchange_txn + sebi + gst + stt + stamp + dp
 
 
+BREAKEVEN_SOLVE_ITERATIONS = 5  # sell-side cost depends weakly on the exit value
+# (itself a function of the breakeven % being solved for), so this is solved by
+# fixed-point iteration rather than closed-form. Converges to within fractions of
+# a rupee well before 5 iterations -- the dependency is a ~0.1% second-order effect.
+
+
+def compute_mtf_breakeven_pct(position_value: float, funded_amount: float, days_held: int) -> float:
+    """The price move (as a fraction of `position_value`, e.g. 0.0035 for
+    0.35%) an MTF position needs just to cover its own round-trip cost: entry
+    + exit charges (mtf_order_cost), pledge AND unpledge (2x
+    MTF_PLEDGE_CHARGE), and the daily funding interest accrued on
+    `funded_amount` over `days_held` (mtf_interest) -- below this, selling
+    is a net loss even if the raw price is above the entry price.
+
+    `funded_amount` is THIS position's real broker-financed amount, which
+    varies per stock (Zerodha sets MTF margin % per instrument) -- callers
+    should get it from Kite's actual margin calculation for the position
+    (see src/swing_live.py's _funded_amount_for_position), not assume a
+    fixed leverage ratio.
+    """
+    buy_cost = mtf_order_cost(position_value, "buy")
+    interest = mtf_interest(funded_amount, days_held)
+    pledge_roundtrip = 2 * MTF_PLEDGE_CHARGE
+    x = 0.0
+    for _ in range(BREAKEVEN_SOLVE_ITERATIONS):
+        exit_value = position_value * (1 + x)
+        sell_cost = mtf_order_cost(exit_value, "sell")
+        total_cost = buy_cost + sell_cost + pledge_roundtrip + interest
+        x = total_cost / position_value
+    return x
+
+
 @dataclass
 class SwingPosition:
     symbol: str

@@ -34,16 +34,28 @@ not once a day -- "constantly track the stocks and book or trail profit,"
 per explicit instruction. Uses kite.quote() for live price, polled at
 POLL_INTERVAL_SECONDS; swing positions move on the order of minutes to
 days, so this does not need run_live.py's 1-second intraday cadence.
+
+Trailing-arm threshold is BREAKEVEN-ADJUSTED, not a flat 2% above
+avg_price, per explicit instruction ("I need 2% from the breakeven -- if
+breakeven is 0.10%, start trailing when the return is 2.10%"). Breakeven
+(src.swing_strategy.compute_mtf_breakeven_pct) grows with how long the
+position has been held, since the dominant cost is daily MTF funding
+interest on the funded (broker-financed) amount -- a position held 2
+months needs roughly 2.1% just to cover its own costs, not 0%, so arming
+at a flat 2% would mean trailing starts barely above TRUE breakeven by
+then, not 2% of real profit above it. The funded amount is fetched PER
+POSITION via Kite's own order-margin calculator (_funded_amount_for_position)
+rather than assumed, since MTF margin % varies per stock.
 """
 
 import json
 import time as time_module
-from datetime import datetime, time
+from datetime import date, datetime, time
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from . import auth, config, orders
-from .swing_strategy import PROFIT_TARGET_PCT, TRAILING_PCT
+from .swing_strategy import PROFIT_TARGET_PCT, TRAILING_PCT, compute_mtf_breakeven_pct
 
 IST = ZoneInfo("Asia/Kolkata")
 
@@ -73,6 +85,7 @@ class SwingLogger:
         "swing_trailing_armed",
         "swing_exit",
         "swing_position_closed_externally",
+        "swing_funded_amount_unavailable",
         "start",
         "end",
     }
@@ -106,8 +119,17 @@ class SwingLogger:
 
 
 def load_state() -> dict[str, dict]:
-    """{symbol: {"trailing": bool, "peak_price": float|None}}. A missing
-    file means nothing is armed yet anywhere -- not an error."""
+    """{symbol: {"trailing": bool, "peak_price": float|None, "entry_date":
+    "YYYY-MM-DD"|None, "funded_amount": float|None, "last_qty": int|None}}.
+    entry_date is a PROXY for the real buy date -- the date this guardian
+    first saw the position, not necessarily when it was actually bought (if
+    the guardian wasn't running yet at entry, e.g. after a restart gap, this
+    under-counts days held and so under-counts breakeven -- see
+    _funded_amount_for_position's own caveat on this same limitation).
+    funded_amount is this position's real MTF-financed amount from Kite's
+    own margin calculator, None if it couldn't be determined (callers must
+    then fall back to the flat PROFIT_TARGET_PCT, not assume a leverage).
+    A missing file means nothing is tracked yet anywhere -- not an error."""
     if not SWING_STATE_FILE.exists():
         return {}
     with open(SWING_STATE_FILE) as f:
@@ -148,11 +170,69 @@ def _fetch_ltp(kite, symbols: list[str]) -> dict[str, float]:
     return result
 
 
+def _funded_amount_for_position(kite, symbol: str, quantity: int, avg_price: float) -> float | None:
+    """Best-effort fetch of THIS position's real MTF funded (broker-financed)
+    amount, via Kite's own order-margin calculator (kite.order_margins) --
+    not an assumed leverage ratio, since MTF margin % is set per stock.
+
+    Computed as position_value - required_margin, where required_margin
+    comes from Kite's response to a hypothetical fresh BUY of this exact
+    quantity/symbol/product -- the actual margin already locked in in
+    Kite's books for this real position may differ slightly if Kite's
+    margin table for this stock changed since the real entry, but this is
+    the closest available estimate without a documented endpoint for
+    reading an existing position's original margin breakdown.
+
+    Returns None (never raises) if the call fails or the response doesn't
+    have the expected shape -- callers must fall back to the flat
+    PROFIT_TARGET_PCT in that case rather than silently guessing."""
+    try:
+        result = kite.order_margins(
+            [
+                {
+                    "exchange": "NSE",
+                    "tradingsymbol": symbol,
+                    "transaction_type": "BUY",
+                    "variety": "regular",
+                    "product": orders.PRODUCT_MTF,
+                    "order_type": "MARKET",
+                    "quantity": quantity,
+                    "price": 0,
+                    "trigger_price": 0,
+                }
+            ]
+        )
+        required_margin = float(result[0]["total"])
+    except orders.PLACEMENT_EXCEPTIONS + (KeyError, IndexError, TypeError, ValueError) as exc:
+        print(f"WARNING: could not compute MTF funded amount for {symbol} via order_margins: {exc}")
+        return None
+    position_value = quantity * avg_price
+    return max(0.0, position_value - required_margin)
+
+
+def _arm_threshold_pct(kite, symbol: str, pos: dict, st: dict, today: date, logger: SwingLogger) -> float:
+    """breakeven% (for however long this position has actually been held) +
+    PROFIT_TARGET_PCT -- see this module's own docstring for why the arm
+    point moves with holding period instead of staying a flat 2%. Falls
+    back to the flat PROFIT_TARGET_PCT alone if the funded amount isn't
+    known (logged once, not every poll, via the caller checking
+    st['funded_amount'] is already None before calling this with a fresh
+    fetch attempt)."""
+    if st["funded_amount"] is None:
+        return PROFIT_TARGET_PCT
+    entry_date = date.fromisoformat(st["entry_date"])
+    days_held = max(0, (today - entry_date).days)
+    position_value = pos["quantity"] * pos["average_price"]
+    breakeven_pct = compute_mtf_breakeven_pct(position_value, st["funded_amount"], days_held)
+    return breakeven_pct + PROFIT_TARGET_PCT
+
+
 def check_once(kite, state: dict[str, dict], logger: SwingLogger) -> None:
     """One pass: reconcile tracked state against Kite's real MTF positions,
-    then apply profit-target-arm / trailing-stop logic and place any real
-    exit that triggers. Mutates `state` in place; caller is responsible for
-    persisting it (see run_swing_guardian)."""
+    then apply breakeven-adjusted-profit-target-arm / trailing-stop logic
+    and place any real exit that triggers. Mutates `state` in place; caller
+    is responsible for persisting it (see run_swing_guardian)."""
+    today = _now().date()
     positions = _fetch_mtf_positions(kite)
 
     for symbol in list(state.keys()):
@@ -162,10 +242,37 @@ def check_once(kite, state: dict[str, dict], logger: SwingLogger) -> None:
 
     for symbol, pos in positions.items():
         if symbol not in state:
-            state[symbol] = {"trailing": False, "peak_price": None}
+            funded_amount = _funded_amount_for_position(kite, symbol, pos["quantity"], pos["average_price"])
+            if funded_amount is None:
+                logger.event("swing_funded_amount_unavailable", symbol=symbol)
+            state[symbol] = {
+                "trailing": False,
+                "peak_price": None,
+                "entry_date": today.isoformat(),
+                "funded_amount": funded_amount,
+                "last_qty": pos["quantity"],
+            }
             logger.event(
-                "swing_position_detected", symbol=symbol, qty=pos["quantity"], avg_price=pos["average_price"]
+                "swing_position_detected",
+                symbol=symbol,
+                qty=pos["quantity"],
+                avg_price=pos["average_price"],
+                funded_amount=funded_amount,
             )
+        elif pos["quantity"] != state[symbol].get("last_qty"):
+            # Quantity changed since last poll -- a manual averaging leg or partial
+            # sell -- re-fetch the funded amount against the new quantity/avg_price
+            # rather than let it go stale. Keeps the ORIGINAL entry_date (see
+            # load_state's own caveat on why this can understate days_held for an
+            # averaged-in leg, which makes breakeven a slight UNDERestimate for
+            # that leg specifically but an overestimate for the position as a
+            # whole once blended -- net effect is a conservative, not reckless,
+            # bias, which is the safer direction to be wrong in).
+            funded_amount = _funded_amount_for_position(kite, symbol, pos["quantity"], pos["average_price"])
+            state[symbol]["funded_amount"] = funded_amount
+            state[symbol]["last_qty"] = pos["quantity"]
+            if funded_amount is None:
+                logger.event("swing_funded_amount_unavailable", symbol=symbol)
 
     if not positions:
         return
@@ -224,10 +331,13 @@ def check_once(kite, state: dict[str, dict], logger: SwingLogger) -> None:
             )
             del state[symbol]
         else:
-            if ltp >= avg_price * (1 + PROFIT_TARGET_PCT):
+            arm_pct = _arm_threshold_pct(kite, symbol, pos, st, today, logger)
+            if ltp >= avg_price * (1 + arm_pct):
                 st["trailing"] = True
                 st["peak_price"] = ltp
-                logger.event("swing_trailing_armed", symbol=symbol, avg_price=avg_price, armed_at=ltp)
+                logger.event(
+                    "swing_trailing_armed", symbol=symbol, avg_price=avg_price, armed_at=ltp, arm_pct=round(arm_pct * 100, 3)
+                )
 
 
 def run_swing_guardian(poll_interval: int = POLL_INTERVAL_SECONDS, notifier=None, should_stop=None) -> None:
