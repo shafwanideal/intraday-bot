@@ -1,0 +1,54 @@
+# Continuous tracker for real Zerodha MTF (leveraged swing) positions --
+# watches whatever's actually held on Kite and auto-places the matching SELL
+# the moment a trailing stop is breached. Never places a BUY/entry -- entries
+# and averaging legs are placed manually by the trader outside this bot --
+# which is what makes this safe to run unattended with no CONFIRM prompt. See
+# src/swing_live.py's own docstring for the full design.
+#
+# Install on the Contabo box:
+#   sudo cp deploy/swing-guardian.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now swing-guardian
+#
+# Requires LIVE_TRADING_ENABLED=true in .env (same gate as run_live.py) --
+# the process refuses to start without it, by design.
+#
+# Adjust User= and the paths below if the checkout isn't at
+# /home/trader/intraday-bot.
+
+[Unit]
+Description=Swing (MTF) position guardian -- auto profit-booking/trailing exit
+After=network-online.target
+Wants=network-online.target
+
+StartLimitBurst=5
+StartLimitIntervalSec=300
+
+[Service]
+Type=simple
+User=trader
+WorkingDirectory=/home/trader/intraday-bot
+ExecStart=/home/trader/intraday-bot/.venv/bin/python3 scripts/run_swing_live.py
+
+Restart=on-failure
+RestartSec=15
+
+Environment=PYTHONUNBUFFERED=1
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=swing-guardian
+
+# Hardening -- same posture as intraday-bot.service/watchdog.service. This
+# process holds Kite credentials and can place real (exit-only) orders.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/trader/intraday-bot
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+
+[Install]
+WantedBy=multi-user.target
