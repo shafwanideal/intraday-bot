@@ -141,16 +141,25 @@ def save_state(state: dict[str, dict]) -> None:
         json.dump(state, f, indent=2)
 
 
-def _fetch_mtf_positions(kite) -> dict[str, dict]:
+def _fetch_mtf_positions(kite) -> dict[str, dict] | None:
     """Current real MTF positions keyed by symbol, straight from Kite --
     the only source of truth for what's actually held and at what average
-    price. Returns {} on a fetch failure rather than raising, so a
-    transient API hiccup doesn't kill the whole poll loop."""
+    price. Returns None (NOT {}) on a fetch failure -- e.g. a stale/expired
+    Kite access token, which happens every day Kite isn't freshly logged
+    into, or a transient network hiccup. This distinction matters a lot:
+    check_once() treats a symbol missing from this result as "closed
+    externally" and drops it from tracking. {} on a genuine API failure
+    would look EXACTLY like "you hold nothing," which would silently wipe
+    every tracked position out of state the moment auth went stale --
+    found while reasoning through what happens if this runs across a token
+    expiry without a fresh login. None lets the caller skip the whole poll
+    instead, leaving existing tracked state untouched until the next
+    successful fetch."""
     try:
         net = kite.positions().get("net", [])
     except orders.PLACEMENT_EXCEPTIONS as exc:
         print(f"WARNING: could not fetch positions from Kite: {exc}")
-        return {}
+        return None
     return {p["tradingsymbol"]: p for p in net if p.get("product") == orders.PRODUCT_MTF and p.get("quantity", 0) > 0}
 
 
@@ -234,6 +243,15 @@ def check_once(kite, state: dict[str, dict], logger: SwingLogger) -> None:
     is responsible for persisting it (see run_swing_guardian)."""
     today = _now().date()
     positions = _fetch_mtf_positions(kite)
+    if positions is None:
+        # Fetch failed -- most likely a stale/expired Kite access token (these
+        # expire every day; see run_swing_guardian's own docstring on needing a
+        # fresh login daily) or a transient network issue. Skip this poll
+        # entirely rather than risk treating "couldn't check" as "nothing is
+        # held anymore" -- existing tracked state (and any already-armed
+        # trailing stop) is left exactly as it was for the next successful poll.
+        logger.event("swing_poll_skipped_fetch_failed")
+        return
 
     for symbol in list(state.keys()):
         if symbol not in positions:
