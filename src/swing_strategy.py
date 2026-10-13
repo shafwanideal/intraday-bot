@@ -34,18 +34,67 @@ DELIVERY_SEBI_RATE = 0.000001  # both sides -- same as intraday
 DELIVERY_STAMP_DUTY_RATE = 0.00015  # 0.015% buy side only (intraday MIS is 0.003%)
 DELIVERY_GST_RATE = 0.18  # on brokerage + exchange txn charges (brokerage is 0, so this
 # only actually taxes the exchange txn charge here)
-DELIVERY_DP_CHARGE = 15.93  # Zerodha's flat DP (depository participant) charge per
-# scrip per sell day, CDSL fee + GST included -- approximate, varies slightly; only
-# applies once per SELL of a given scrip on a given day, not per buy or per leg.
+DELIVERY_DP_CHARGE = 15.34  # Zerodha's flat DP (depository participant) charge per
+# scrip per sell day: Rs 3.50 CDSL fee + Rs 9.50 Zerodha fee + Rs 2.34 GST (18% of
+# 13.00) = 15.34 exactly -- confirmed against zerodha.com/charges 2026-10-13, not an
+# approximation. Only applies once per SELL of a given scrip on a given day, not per
+# buy or per leg.
 
 
 def delivery_order_cost(value: float, side: str) -> float:
-    """Real Zerodha equity delivery charges for one order leg. `side` is "buy" or "sell"."""
+    """Real Zerodha equity delivery (CNC) charges for one order leg. `side` is "buy" or "sell"."""
     brokerage = DELIVERY_BROKERAGE
     exchange_txn = DELIVERY_EXCHANGE_TXN_RATE * value
     sebi = DELIVERY_SEBI_RATE * value
     gst = DELIVERY_GST_RATE * (brokerage + exchange_txn)
     stt = DELIVERY_STT_RATE * value  # both sides for delivery
+    stamp = DELIVERY_STAMP_DUTY_RATE * value if side == "buy" else 0.0
+    dp = DELIVERY_DP_CHARGE if side == "sell" else 0.0
+    return brokerage + exchange_txn + sebi + gst + stt + stamp + dp
+
+
+# Real Zerodha MTF (Margin Trading Facility) charges -- confirmed against
+# zerodha.com/charges 2026-10-13. MTF still settles as genuine equity delivery
+# (shares are pledged as collateral, not held outright, but STT/transaction/SEBI/
+# stamp/DP all still apply exactly as for CNC) -- only brokerage, the daily funding
+# interest, and the pledge/unpledge charge are different from plain delivery.
+MTF_BROKERAGE_RATE = 0.003  # 0.3% per executed order...
+MTF_BROKERAGE_CAP = 20.0  # ...or Rs 20/executed order, whichever is LOWER (CNC is zero)
+MTF_INTEREST_RATE_DAILY = 0.0004  # 0.04%/day (Rs 40/lakh) on the FUNDED (borrowed)
+# portion only -- NOT the full position value. Applied from T+1 until the day the
+# MTF position is sold, per Zerodha's own wording ("interest is applied from T+1 day
+# until the day MTF stocks are sold").
+MTF_PLEDGE_CHARGE = 15.0 * 1.18  # Rs 15 + 18% GST = Rs 17.70, charged once per PLEDGE
+# request and once per UNPLEDGE request, per ISIN -- i.e. once when shares go in as
+# collateral (entry, and again on each averaging leg that adds new shares) and once
+# when they come out (the full exit).
+
+
+def mtf_brokerage(value: float) -> float:
+    return min(MTF_BROKERAGE_RATE * value, MTF_BROKERAGE_CAP)
+
+
+def mtf_interest(funded_amount: float, days_held: int) -> float:
+    """Daily funding interest on the FUNDED (leveraged/borrowed) portion of an
+    MTF position -- `funded_amount` is that leg's value minus the trader's own
+    margin contribution, NOT the full position value. `days_held` should count
+    from T+1 through the exit day inclusive, per Zerodha's own wording."""
+    return MTF_INTEREST_RATE_DAILY * funded_amount * max(0, days_held)
+
+
+def mtf_order_cost(value: float, side: str) -> float:
+    """Per-order charges for an MTF leg (buy or sell) -- EVERYTHING EXCEPT the
+    daily funding interest (see mtf_interest -- needs the funded amount and
+    holding period, tracked separately per leg) and the pledge/unpledge charge
+    (see MTF_PLEDGE_CHARGE -- flat per request, not scaled by value). STT,
+    exchange transaction charges, SEBI charges, stamp duty and the DP charge are
+    all identical to plain equity delivery; only brokerage differs (CNC is zero,
+    MTF is 0.3%/Rs 20 capped)."""
+    brokerage = mtf_brokerage(value)
+    exchange_txn = DELIVERY_EXCHANGE_TXN_RATE * value
+    sebi = DELIVERY_SEBI_RATE * value
+    gst = DELIVERY_GST_RATE * (brokerage + exchange_txn)
+    stt = DELIVERY_STT_RATE * value
     stamp = DELIVERY_STAMP_DUTY_RATE * value if side == "buy" else 0.0
     dp = DELIVERY_DP_CHARGE if side == "sell" else 0.0
     return brokerage + exchange_txn + sebi + gst + stt + stamp + dp
