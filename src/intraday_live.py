@@ -295,7 +295,7 @@ def check_once(kite, state: dict[str, dict], logger: IntradayLogger) -> None:
                 triggered = ltp >= stop_level
 
             if triggered:
-                fill = _place_exit(kite, symbol, direction, qty, ltp, "intraday_trailing_exit", logger)
+                fill = _place_exit(kite, symbol, direction, qty, ltp, "intraday_exit", logger)
                 if fill is not None:
                     logger.event(
                         "intraday_exit",
@@ -355,7 +355,22 @@ def run_intraday_guardian(poll_interval: int = POLL_INTERVAL_SECONDS, notifier=N
                 time_module.sleep(min(poll_interval, 60))
                 continue
 
-            check_once(kite, state, logger)
+            try:
+                check_once(kite, state, logger)
+            except Exception as exc:  # noqa: BLE001 - see comment below
+                # A bug in ONE poll must never silently kill protection on
+                # EVERY tracked position for the rest of the day -- found for
+                # real 2026-10-14: an order-tag-length ValueError inside
+                # check_once propagated all the way out of this loop,
+                # crashing the whole process and abandoning both of that
+                # day's tracked positions (INDIGO survived only because it
+                # hadn't armed yet; ZYDUSLIFE had just armed and correctly
+                # decided to exit the instant before the crash hit). Logging
+                # CRITICAL and continuing the loop is the same posture
+                # run_live.py takes on an exit that can't be confirmed --
+                # surface it loudly for a human, but keep watching everything
+                # else rather than going dark entirely.
+                logger.critical(f"check_once() raised an unexpected exception -- continuing to poll, but investigate now: {exc!r}")
             save_state(state)
             time_module.sleep(poll_interval)
     finally:

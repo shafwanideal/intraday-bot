@@ -393,7 +393,14 @@ def run_swing_guardian(poll_interval: int = POLL_INTERVAL_SECONDS, notifier=None
                 time_module.sleep(min(poll_interval, 60))
                 continue
 
-            check_once(kite, state, logger)
+            try:
+                check_once(kite, state, logger)
+            except Exception as exc:  # noqa: BLE001 - see intraday_live.py's identical
+                # guard and comment for the real incident (an order-tag-length bug)
+                # that crashed that guardian entirely and abandoned every tracked
+                # position for the rest of the day. One bad poll must never take
+                # down protection on everything else being watched.
+                logger.critical(f"check_once() raised an unexpected exception -- continuing to poll, but investigate now: {exc!r}")
             save_state(state)
             time_module.sleep(poll_interval)
     finally:
