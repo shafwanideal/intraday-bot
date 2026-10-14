@@ -13,5 +13,6 @@ logs/
 todays_stocks.json
 todays_live_stocks.json
 swing_positions_state.json
+intraday_manual_positions_state.json
 .DS_Store
 .cache/
