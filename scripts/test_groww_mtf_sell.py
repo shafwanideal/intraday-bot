@@ -47,6 +47,9 @@ try:
     )
     print("PLACE RESPONSE:", resp)
     order_id = resp.get("groww_order_id")
+    if not order_id or str(resp.get("order_status", "")).upper() in {"FAILED", "REJECTED"}:
+        print(f"\nRESULT: NOT ACCEPTED -> order_status={resp.get('order_status')} remark={resp.get('remark')!r}")
+        raise SystemExit(1)
 except Exception as exc:  # noqa: BLE001
     print(f"\nRESULT: REJECTED -> {exc!r}")
     print(f"Groww's API does NOT accept this sell with product {product}.")

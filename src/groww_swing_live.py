@@ -43,6 +43,12 @@ POLL_INTERVAL_SECONDS = 30
 TRAIL_PCT = float(os.getenv("GROWW_TRAIL_PCT", "0.015"))
 MAX_BAR_AGE_MINUTES = 10
 RELOGIN_AFTER_FAILURES = 3
+# Verified 2026-10-16 with scripts/test_groww_mtf_sell.py: Groww's API rejects
+# product "MTF" ("Invalid product type for CASH segment") and a "CNC" sell fails
+# ("You don't have enough shares") because MTF shares are not CNC holdings.
+# So the guardian cannot sell MTF positions; it alerts and the user sells in
+# the Groww app. Flip this only after re-running the test shows an accepted sell.
+API_CAN_SELL_MTF = False
 BREACH_POLLS = 2  # consecutive polls at/below the stop before exiting
 
 
@@ -179,9 +185,9 @@ def check_once(g, state: dict[str, dict], logger: SwingLogger) -> bool:
                          count=st["breach_count"])
             continue
 
-        if not groww_client.live_orders_enabled():
+        if not (groww_client.live_orders_enabled() and API_CAN_SELL_MTF):
             if not st.get("alerted"):
-                logger.event("WOULD_SELL_dry_run", symbol=symbol, qty=pos["quantity"], ltp=ltp,
+                logger.event("SELL_NOW_IN_GROWW_APP" if groww_client.live_orders_enabled() else "WOULD_SELL_dry_run", symbol=symbol, qty=pos["quantity"], ltp=ltp,
                              stop=round(stop, 2), peak=st["peak_price"], avg_price=avg)
                 st["alerted"] = True
             continue
@@ -200,7 +206,7 @@ def run_guardian(poll_interval: int = POLL_INTERVAL_SECONDS) -> None:
     g = groww_client.get_groww()
     logger = SwingLogger(LOG_DIR / f"groww_swing_{_now().date().isoformat()}.jsonl")
     state = load_state()
-    mode = "LIVE ORDERS" if groww_client.live_orders_enabled() else "ALERT-ONLY (no orders)"
+    mode = "LIVE ORDERS" if groww_client.live_orders_enabled() and API_CAN_SELL_MTF else "ALERT-ONLY (Groww API cannot sell MTF -- sell by hand in the app)"
     logger.event("start", mode=mode, tracked=list(state), trail_pct=TRAIL_PCT)
     failures, login_date = 0, _now().date()
     try:
