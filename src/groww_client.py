@@ -1,6 +1,7 @@
 """Thin wrapper over Groww's official Trade API (`growwapi` SDK).
 
-Auth: set GROWW_API_KEY + GROWW_API_SECRET in .env (key and secret from
+Auth (preferred, unattended): GROWW_TOTP_TOKEN + GROWW_TOTP_SECRET.
+Otherwise: set GROWW_API_KEY + GROWW_API_SECRET in .env (key and secret from
 Groww's API keys page). Alternatively set GROWW_ACCESS_TOKEN directly.
 Orders are dry-run unless GROWW_LIVE_ORDERS=true.
 
@@ -19,10 +20,16 @@ def get_groww():
     from growwapi import GrowwAPI
 
     token = os.getenv("GROWW_ACCESS_TOKEN")
+    totp_token, totp_secret = os.getenv("GROWW_TOTP_TOKEN"), os.getenv("GROWW_TOTP_SECRET")
+    if not token and totp_token and totp_secret:
+        # Unattended login: keys reset daily at 6 AM, so generate the code ourselves.
+        import pyotp
+
+        token = GrowwAPI.get_access_token(api_key=totp_token, totp=pyotp.TOTP(totp_secret).now())
     if not token:
         key, secret = os.getenv("GROWW_API_KEY"), os.getenv("GROWW_API_SECRET")
         if not key or not secret:
-            raise SystemExit("Set GROWW_API_KEY and GROWW_API_SECRET in .env")
+            raise SystemExit("Set GROWW_TOTP_TOKEN+GROWW_TOTP_SECRET (or GROWW_API_KEY+GROWW_API_SECRET) in .env")
         token = GrowwAPI.get_access_token(api_key=key, secret=secret)
     return GrowwAPI(token)
 

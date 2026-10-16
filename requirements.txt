@@ -6,3 +6,4 @@ curl_cffi>=0.15
 pandas>=2.0.0
 requests>=2.31.0
 growwapi>=1.0.0
+pyotp>=2.9
