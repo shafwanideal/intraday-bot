@@ -8,6 +8,9 @@ like a password. Messages carry symbols/prices, never keys.
 import os
 
 import requests
+from dotenv import load_dotenv
+
+load_dotenv()
 
 SERVER = os.getenv("NTFY_SERVER", "https://ntfy.sh").rstrip("/")
 
