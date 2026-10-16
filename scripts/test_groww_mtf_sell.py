@@ -4,7 +4,7 @@ Places ONE limit SELL of 1 share ~15% above the current price (it should not
 fill), prints Groww's answer, then cancels it straight away. Real order on
 your real account -- requires --go.
 
-    .venv/bin/python -m scripts.test_groww_mtf_sell --go [SYMBOL]
+    .venv/bin/python -m scripts.test_groww_mtf_sell --go [--cnc] [SYMBOL]
 
 SYMBOL defaults to the open MTF position with the lowest share price.
 """
@@ -25,6 +25,7 @@ g = groww_client.get_groww()
 positions = groww_swing_live.fetch_mtf_positions(g)
 if not positions:
     raise SystemExit("No open MTF positions found (or fetch failed).")
+product = "CNC" if "--cnc" in sys.argv else "MTF"
 args = [a for a in sys.argv[1:] if not a.startswith("--")]
 symbol = args[0] if args else min(positions, key=lambda s: positions[s]["average_price"])
 if symbol not in positions:
@@ -35,20 +36,20 @@ if df.empty or (now - df.index[-1].to_pydatetime()).total_seconds() > 600:
     raise SystemExit("No fresh Yahoo price for " + symbol + "; not placing anything.")
 ltp = float(df["Close"].iloc[-1])
 price = round(round(ltp * 1.15 / 0.05) * 0.05, 2)
-print(f"Testing {symbol}: last price {ltp}, placing 1-share LIMIT SELL (product MTF) at {price}")
+print(f"Testing {symbol}: last price {ltp}, placing 1-share LIMIT SELL (product {product}) at {price}")
 
 order_id = None
 try:
     resp = g.place_order(
         trading_symbol=symbol, quantity=1, price=price, validity=g.VALIDITY_DAY,
-        exchange=g.EXCHANGE_NSE, segment=g.SEGMENT_CASH, product=g.PRODUCT_MTF,
+        exchange=g.EXCHANGE_NSE, segment=g.SEGMENT_CASH, product=product,
         order_type=g.ORDER_TYPE_LIMIT, transaction_type=g.TRANSACTION_TYPE_SELL,
     )
     print("PLACE RESPONSE:", resp)
     order_id = resp.get("groww_order_id")
 except Exception as exc:  # noqa: BLE001
     print(f"\nRESULT: REJECTED -> {exc!r}")
-    print("Groww's API does NOT accept this MTF sell as sent. The guardian's live sells will fail.")
+    print(f"Groww's API does NOT accept this sell with product {product}.")
     raise SystemExit(1)
 finally:
     if order_id:
@@ -61,4 +62,4 @@ finally:
         except Exception as exc:  # noqa: BLE001
             print(f"!!! CANCEL FAILED ({exc!r}) -- cancel order {order_id} in the Groww app NOW !!!")
 
-print("\nRESULT: ACCEPTED -> Groww's API takes an MTF SELL. Check the Groww orders screen to confirm it shows cancelled.")
+print(f"\nRESULT: ACCEPTED -> Groww's API took a {product} SELL order (it may NOT close your MTF position properly -- this only proves the order was accepted). Check the Groww orders screen to confirm it shows cancelled.")
