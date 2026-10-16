@@ -13,6 +13,9 @@ tests = {
     "daily candles": lambda: g.get_historical_candle_data(
         trading_symbol="RELIANCE", exchange=g.EXCHANGE_NSE, segment=g.SEGMENT_CASH,
         start_time=start.strftime(fmt), end_time=end.strftime(fmt), interval_in_minutes=1440),
+    "candles (new api)": lambda: g.get_historical_candles(
+        g.EXCHANGE_NSE, g.SEGMENT_CASH, "NSE-RELIANCE",
+        start.strftime(fmt), end.strftime(fmt), "1day"),
 }
 for name, fn in tests.items():
     try:
