@@ -1,0 +1,17 @@
+[Unit]
+Description=Groww MTF swing trailing-stop guardian (alert-only)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=__DIR__
+ExecStart=__DIR__/.venv/bin/python -u -m scripts.run_groww_swing
+Restart=always
+RestartSec=15
+Environment=PYTHONUNBUFFERED=1
+# Keep the key file readable only by the service user
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target
