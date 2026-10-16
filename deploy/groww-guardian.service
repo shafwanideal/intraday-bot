@@ -2,6 +2,9 @@
 Description=Groww MTF swing trailing-stop guardian (alert-only)
 After=network-online.target
 Wants=network-online.target
+# Stop a crash loop from spamming your phone: 5 failures in 5 min and it stays down.
+StartLimitBurst=5
+StartLimitIntervalSec=300
 
 [Service]
 Type=simple
