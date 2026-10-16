@@ -56,3 +56,18 @@ def place_delivery_order(g, symbol: str, qty: int, side: str, limit_price: float
         print(f"[DRY RUN] would place: {args}")
         return None
     return g.place_order(**args)
+
+
+def place_exit_order(g, symbol: str, qty: int, product: str = "MTF"):
+    """Market SELL of an existing position. Only called when
+    GROWW_LIVE_ORDERS=true."""
+    return g.place_order(
+        trading_symbol=symbol,
+        quantity=qty,
+        validity=g.VALIDITY_DAY,
+        exchange=g.EXCHANGE_NSE,
+        segment=g.SEGMENT_CASH,
+        product=getattr(g, f"PRODUCT_{product}", product),
+        order_type=g.ORDER_TYPE_MARKET,
+        transaction_type=g.TRANSACTION_TYPE_SELL,
+    )
