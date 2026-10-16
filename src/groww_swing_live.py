@@ -26,7 +26,7 @@ import os
 import time as time_module
 from datetime import date, datetime
 
-from . import groww_client, yahoo_intraday
+from . import groww_client, ntfy_notify, yahoo_intraday
 from .swing_live import (
     IST,
     LOG_DIR,
@@ -50,6 +50,41 @@ RELOGIN_AFTER_FAILURES = 3
 # the Groww app. Flip this only after re-running the test shows an accepted sell.
 API_CAN_SELL_MTF = False
 BREACH_POLLS = 2  # consecutive polls at/below the stop before exiting
+
+
+class GrowwLogger(SwingLogger):
+    """SwingLogger plus readable phone pushes (ntfy) for the events that matter."""
+
+    NOTIFY_KINDS: set = set()  # parent's raw notifier is not used; see _push
+
+    def _push(self, kind: str, f: dict) -> None:
+        if self.notifier is None:
+            return
+        sym = f.get("symbol")
+        if kind == "SELL_NOW_IN_GROWW_APP":
+            self.notifier(f"SELL {sym} NOW in the Groww app. {f['qty']} sh, price {f['ltp']:.2f} <= stop {f['stop']:.2f} "
+                          f"(peak {f['peak']:.2f}, avg {f['avg_price']:.2f})", title=f"SELL {sym} NOW", priority="urgent", tags="warning")
+        elif kind == "WOULD_SELL_dry_run":
+            self.notifier(f"{sym} hit its trailing stop ({f['ltp']:.2f} <= {f['stop']:.2f}).", title=f"Stop hit {sym}", priority="high")
+        elif kind == "swing_trailing_armed":
+            self.notifier(f"{sym} trailing armed at {f['armed_at']:.2f} (avg {f['avg_price']:.2f}).", title=f"Armed {sym}")
+        elif kind == "swing_position_closed_externally":
+            self.notifier(f"{sym} is no longer held; tracking dropped.", title=f"Closed {sym}")
+        elif kind == "start":
+            self.notifier(f"Guardian started. {f.get('mode')}. Tracking {len(f.get('tracked', []))} positions.", title="Guardian up")
+        elif kind == "end":
+            self.notifier("Guardian STOPPED.", title="Guardian down", priority="high", tags="warning")
+
+    def event(self, kind: str, **fields) -> None:
+        super().event(kind, **fields)
+        try:
+            self._push(kind, fields)
+        except Exception as exc:  # noqa: BLE001 - formatting must never break tracking
+            print(f"WARNING: push formatting failed for {kind}: {exc!r}")
+
+    def _notify(self, text: str) -> None:  # used by critical()
+        if self.notifier is not None:
+            self.notifier(text, title="Guardian CRITICAL", priority="urgent", tags="rotating_light")
 
 
 def _funded_fraction() -> float | None:
@@ -204,7 +239,8 @@ def check_once(g, state: dict[str, dict], logger: SwingLogger) -> bool:
 
 def run_guardian(poll_interval: int = POLL_INTERVAL_SECONDS) -> None:
     g = groww_client.get_groww()
-    logger = SwingLogger(LOG_DIR / f"groww_swing_{_now().date().isoformat()}.jsonl")
+    logger = GrowwLogger(LOG_DIR / f"groww_swing_{_now().date().isoformat()}.jsonl",
+                         notifier=ntfy_notify.send if ntfy_notify.enabled() else None)
     state = load_state()
     mode = "LIVE ORDERS" if groww_client.live_orders_enabled() and API_CAN_SELL_MTF else "ALERT-ONLY (Groww API cannot sell MTF -- sell by hand in the app)"
     logger.event("start", mode=mode, tracked=list(state), trail_pct=TRAIL_PCT)
