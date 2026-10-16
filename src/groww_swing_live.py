@@ -43,6 +43,7 @@ POLL_INTERVAL_SECONDS = 30
 TRAIL_PCT = float(os.getenv("GROWW_TRAIL_PCT", "0.015"))
 MAX_BAR_AGE_MINUTES = 10
 RELOGIN_AFTER_FAILURES = 3
+BREACH_POLLS = 2  # consecutive polls at/below the stop before exiting
 
 
 def _funded_fraction() -> float | None:
@@ -167,6 +168,15 @@ def check_once(g, state: dict[str, dict], logger: SwingLogger) -> bool:
         stop = st["peak_price"] * (1 - TRAIL_PCT)
         if ltp > stop:
             st["alerted"] = False
+            st["breach_count"] = 0
+            continue
+
+        # One bad/laggy Yahoo print must not trigger a sale: require the price
+        # to stay at/below the stop for BREACH_POLLS consecutive polls.
+        st["breach_count"] = st.get("breach_count", 0) + 1
+        if st["breach_count"] < BREACH_POLLS:
+            logger.event("groww_swing_breach_pending", symbol=symbol, ltp=ltp, stop=round(stop, 2),
+                         count=st["breach_count"])
             continue
 
         if not groww_client.live_orders_enabled():
