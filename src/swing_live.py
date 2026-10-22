@@ -46,6 +46,13 @@ at a flat 2% would mean trailing starts barely above TRUE breakeven by
 then, not 2% of real profit above it. The funded amount is fetched PER
 POSITION via Kite's own order-margin calculator (_funded_amount_for_position)
 rather than assumed, since MTF margin % varies per stock.
+
+Once armed, the stop is FLOORED at the price that triggered arming -- it can
+only ever rise above that level as price climbs further, never fall below it
+(see check_once's trailing branch). Without this floor, the TRAILING_PCT
+pullback calc applied to the just-armed peak can itself sit below the arm
+level (a whipsaw right after arming could exit with less than the guaranteed
+breakeven% + 2% the arm threshold was meant to lock in).
 """
 
 import json
@@ -119,8 +126,15 @@ class SwingLogger:
 
 
 def load_state() -> dict[str, dict]:
-    """{symbol: {"trailing": bool, "peak_price": float|None, "entry_date":
-    "YYYY-MM-DD"|None, "funded_amount": float|None, "last_qty": int|None}}.
+    """{symbol: {"trailing": bool, "peak_price": float|None, "floor_price":
+    float|None, "entry_date": "YYYY-MM-DD"|None, "funded_amount": float|None,
+    "last_qty": int|None}}. floor_price is the price level that armed trailing
+    (avg_price * (1 + arm_pct), i.e. breakeven% + PROFIT_TARGET_PCT) -- once
+    set, the real-time stop can only ever rise above it as price climbs
+    further, never fall below it, guaranteeing at least that locked-in profit
+    once armed (see check_once's trailing branch for why the raw
+    peak*(1-TRAILING_PCT) calc alone doesn't guarantee this immediately after
+    arming).
     entry_date is a PROXY for the real buy date -- the date this guardian
     first saw the position, not necessarily when it was actually bought (if
     the guardian wasn't running yet at entry, e.g. after a restart gap, this
@@ -266,6 +280,7 @@ def check_once(kite, state: dict[str, dict], logger: SwingLogger) -> None:
             state[symbol] = {
                 "trailing": False,
                 "peak_price": None,
+                "floor_price": None,
                 "entry_date": today.isoformat(),
                 "funded_amount": funded_amount,
                 "last_qty": pos["quantity"],
@@ -306,7 +321,14 @@ def check_once(kite, state: dict[str, dict], logger: SwingLogger) -> None:
 
         if st["trailing"]:
             st["peak_price"] = max(st["peak_price"], ltp)
-            stop_level = st["peak_price"] * (1 - TRAILING_PCT)
+            # Floored at the price that armed trailing (breakeven% + PROFIT_TARGET_PCT) --
+            # peak*(1-TRAILING_PCT) alone can sit BELOW that arm price right after arming
+            # whenever the overshoot past the arm threshold is smaller than TRAILING_PCT
+            # itself (e.g. armed right at the threshold with no overshoot, a 1% pullback
+            # from that same peak would otherwise erase part of the guaranteed arm-level
+            # profit). The floor makes the stop only ever rise from the arm level as price
+            # climbs further, never fall below it.
+            stop_level = max(st.get("floor_price", 0.0), st["peak_price"] * (1 - TRAILING_PCT))
             if ltp > stop_level:
                 continue
 
@@ -353,6 +375,7 @@ def check_once(kite, state: dict[str, dict], logger: SwingLogger) -> None:
             if ltp >= avg_price * (1 + arm_pct):
                 st["trailing"] = True
                 st["peak_price"] = ltp
+                st["floor_price"] = avg_price * (1 + arm_pct)
                 logger.event(
                     "swing_trailing_armed", symbol=symbol, avg_price=avg_price, armed_at=ltp, arm_pct=round(arm_pct * 100, 3)
                 )
