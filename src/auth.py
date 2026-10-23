@@ -13,7 +13,13 @@ from . import config
 
 CALLBACK_HOST = "127.0.0.1"
 CALLBACK_PORT = 8000  # must match the Redirect URL registered on developers.kite.trade
-CALLBACK_TIMEOUT_SECONDS = 180
+# Kept short on purpose: the daily VPS login never uses `-L 8000:localhost:8000` port
+# forwarding, so this local callback can NEVER actually receive the redirect -- the full
+# wait was pure dead air every single day, during which anything pasted just sat unread
+# in the terminal until the timeout finally elapsed and the manual-paste prompt appeared.
+# Long enough to still work for anyone who DOES use real port forwarding, short enough
+# that the no-tunnel case (the normal one here) falls through to manual paste quickly.
+CALLBACK_TIMEOUT_SECONDS = 10
 
 
 def _load_cached_session() -> str | None:
