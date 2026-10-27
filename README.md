@@ -43,6 +43,15 @@ Set `KITE_USER_ID=<your Zerodha ID>` in `.env` so the public listener only accep
 for your own account (the API key is public, so otherwise anyone could log in to the app
 with a different Zerodha account and overwrite the saved token).
 
+**Guardians start by themselves.** Right after each successful login, `kite_login.py` runs
+`scripts/on_login.sh`, which starts the swing + intraday guardians in the `guardians` tmux
+session if it isn't already running (it never restarts a running one, so the intraday
+guardian's trailing-stop state is kept). A running guardian picks up the fresh token on its own
+(`auth.refresh_client_if_changed`). The hook sets `LIVE_TRADING_ENABLED=true` only inside the
+guardians' own process -- `.env` is not changed -- and the guardians can only ever place exit
+orders. Its output goes to `logs/on_login.log`. After pulling this change, run
+`pm2 restart kite-login-callback` once so the listener loads it.
+
 Server setup (once): see `deploy/README.md`, "Kite login listener (bookmark mode)".
 The one-off/tunnel alternative still works while the Redirect URL is
 `http://127.0.0.1:8000/`: `ssh -L 8000:127.0.0.1:8000 root@<vps>` then

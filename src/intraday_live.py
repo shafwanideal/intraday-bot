@@ -368,6 +368,11 @@ def run_intraday_guardian(poll_interval: int = POLL_INTERVAL_SECONDS, notifier=N
                 time_module.sleep(min(poll_interval, 60))
                 continue
 
+            fresh = auth.refresh_client_if_changed(kite)
+            if fresh is not kite:
+                kite = fresh
+                logger.event("kite_token_refreshed")
+
             try:
                 check_once(kite, state, logger)
             except Exception as exc:  # noqa: BLE001 - see comment below

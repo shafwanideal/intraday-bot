@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import subprocess
 import sys
 import threading
 import webbrowser
@@ -45,6 +46,9 @@ from kiteconnect import KiteConnect
 ENV_PATH = Path(__file__).resolve().parent / ".env"
 HOST, DEFAULT_PORT, DEFAULT_PATH = "127.0.0.1", 5099, "/zerodha_callback"
 WAIT_SECONDS = 300
+# Optional: if this script exists, it is run (detached) right after every successful login,
+# e.g. to start the guardians. A failure here never affects the login itself.
+POST_LOGIN_HOOK = Path(__file__).resolve().parent / "scripts" / "on_login.sh"
 
 
 def read_env() -> dict:
@@ -73,6 +77,18 @@ def update_env(key: str, value: str) -> None:
     tmp.write_text("\n".join(out) + "\n")
     os.chmod(tmp, 0o600)
     tmp.replace(ENV_PATH)
+
+
+def run_post_login_hook() -> None:
+    if not POST_LOGIN_HOOK.is_file():
+        return
+    try:
+        log = open(ENV_PATH.parent / "logs" / "on_login.log", "ab") if (ENV_PATH.parent / "logs").is_dir() else subprocess.DEVNULL
+        subprocess.Popen(["bash", str(POST_LOGIN_HOOK)], cwd=str(ENV_PATH.parent), stdout=log, stderr=log,
+                         stdin=subprocess.DEVNULL, start_new_session=True)
+        print(f"Ran post-login hook {POST_LOGIN_HOOK.name}", flush=True)
+    except Exception as e:  # noqa: BLE001
+        print(f"Post-login hook failed to start: {e}", flush=True)
 
 
 def credentials() -> tuple[str, str]:
@@ -124,6 +140,7 @@ def make_handler(kite: KiteConnect, api_secret: str, callback_path: str, result:
                             done.set()
                         return
                     update_env("KITE_ACCESS_TOKEN", data["access_token"])
+                    run_post_login_hook()
                     result["ok"] = f"{data.get('user_name')} ({data.get('user_id')})"
                     print(f"AUTH OK. Logged in as {result['ok']}. KITE_ACCESS_TOKEN saved to {ENV_PATH}", flush=True)
                     self._page(200, f"<h3>Zerodha login OK.</h3><p>{result['ok']}. "

@@ -101,6 +101,23 @@ def _token_is_live(token: str) -> bool:
         return False
 
 
+def refresh_client_if_changed(kite: KiteConnect) -> KiteConnect:
+    """For the long-running guardians: if a newer token has been saved to .env since
+    `kite` was built (you clicked the login bookmark again, or it is a new day),
+    return a client on it; otherwise return `kite` itself. Kite replaces the old token
+    on every login, so a guardian that kept its original client would go dark the
+    moment a fresh login happened. Never raises -- a failed refresh keeps the old client."""
+    try:
+        token = _saved_token()
+        if token and token != getattr(kite, "access_token", None) and _token_is_live(token):
+            fresh = KiteConnect(api_key=config.KITE_API_KEY)
+            fresh.set_access_token(token)
+            return fresh
+    except Exception:  # noqa: BLE001 - must never take a guardian down
+        pass
+    return kite
+
+
 def has_valid_session() -> bool:
     """True if get_kite() would succeed, so callers can tell 'needs login' from
     'ready' without raising. A .env token only counts if Kite still accepts it;
