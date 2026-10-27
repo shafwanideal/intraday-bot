@@ -69,7 +69,7 @@ def main() -> None:
     if auth.has_valid_session():
         print("Already logged in for today.")
     else:
-        auth.login(paste_only=True)
+        auth.login()
 
     text = " ".join(sys.argv[1:]).strip()
     if not text:

@@ -26,34 +26,31 @@ toolchain installed.
 
 ## Authenticate
 
-Kite access tokens expire daily, so this must be run once each trading morning:
+Kite access tokens expire daily, so this is done once each trading morning with
+`kite_login.py`, which runs **on the VPS** and catches Kite's redirect through an SSH
+tunnel from your own machine (the Kite app's Redirect URL stays `http://127.0.0.1:8000/`):
 
 ```bash
-python3 -m src.auth            # add --paste on a headless box to skip
-                               # the callback wait and paste the URL directly
+# on your Mac -- opens the tunnel (leave this window open until login finishes)
+ssh -L 8000:127.0.0.1:8000 root@<vps-ip>
+
+# on the VPS, as the bot user
+sudo -iu trader
+cd ~/intraday-bot
+.venv/bin/python3 kite_login.py --redirect http://127.0.0.1:8000/ --no-browser
 ```
 
-This prints a login URL, waits for you to paste back the redirect URL (or
-just the `request_token` from it) after logging in, then exchanges it for an
-access token and caches it in `.kite_session.json` (gitignored) for the rest
-of the day. Other modules should call `src.auth.get_kite()` to get an
-authenticated client — it reuses the cached token if still valid for today.
+It prints a Zerodha login URL; open it in your Mac's browser and log in (password + 2FA are
+typed by you on Zerodha's page). Kite redirects to `127.0.0.1:8000` on your Mac, the tunnel
+carries that to the VPS, and the script saves `KITE_ACCESS_TOKEN` into the VPS `.env`
+(mode 600, gitignored). Verify any time with `kite_login.py check`. Everything else
+(`daily.py`, the guardians, `get_kite()`) reads that token, and re-runs this same login
+automatically if the saved one has gone stale. Do the login **before** starting the guardians.
 
-That login needs a browser and someone at the keyboard, so it can't run in a
-headless or cloud session. For those, generate the token where you *can* log
-in (`python3 -m src.auth` prints `KITE_ACCESS_TOKEN=...` alongside caching it)
-and set it as an environment variable there:
+Port 8000 must be free on the VPS while it runs -- nothing else in this repo listens on it.
 
-```bash
-export KITE_ACCESS_TOKEN=...   # today's token, from the login above
-export KITE_API_KEY=...        # KITE_API_SECRET is NOT needed for this path
-```
-
-`get_kite()` prefers that variable over both the cache and the login flow, and
-validates it up front so an expired one fails immediately with a clear message
-rather than mid-backtest. Kite kills tokens overnight, so it's a fresh value
-each trading day — and it's a live credential that can place orders, not just
-read data, so treat it like one.
+The same `.env` also needs `KITE_API_KEY` and `KITE_API_SECRET`; `KITE_REDIRECT_URL`
+overrides the default redirect if yours differs.
 
 ## Pre-flight check
 
