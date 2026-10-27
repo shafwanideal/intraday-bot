@@ -1,0 +1,20 @@
+#!/bin/bash
+# Keeps the guardians alive: runs scripts/run_all_guardians.py and, if it ever exits (a crash,
+# or a stale/missing Kite token at start), starts it again after a short pause. Meant to be the
+# command inside the "guardians" tmux session. Ctrl+C (or `tmux kill-session -t guardians`)
+# stops it for good -- that is the only way it ends.
+#
+# A restart re-reads the saved Kite token from .env, so once you have clicked the login bookmark
+# a loop that was waiting on a stale token starts the guardians by itself. The swing guardian
+# reloads its saved state on start; the intraday guardian reloads today's saved state (see
+# src/intraday_live.run_intraday_guardian), so a crash restart does not forget armed stops.
+cd "$(dirname "$0")/.." || exit 1
+mkdir -p logs
+DELAY="${GUARDIAN_RESTART_DELAY:-15}"
+trap 'echo "stopping supervisor"; exit 0' INT TERM
+while true; do
+    .venv/bin/python3 scripts/run_all_guardians.py
+    rc=$?
+    echo "$(date '+%Y-%m-%d %H:%M:%S') run_all_guardians exited (code $rc) -- restarting in ${DELAY}s" | tee -a logs/guardians_supervisor.log
+    sleep "$DELAY"
+done

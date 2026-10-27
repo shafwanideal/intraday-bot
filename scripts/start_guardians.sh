@@ -58,7 +58,7 @@ if tmux has-session -t guardians 2>/dev/null; then
     echo "tmux session 'guardians' already exists -- leaving it alone (not restarting, so live tracking state isn't lost)."
 else
     echo "Starting both guardians in a new tmux session..."
-    tmux new-session -d -s guardians -c ~/intraday-bot ".venv/bin/python3 scripts/run_all_guardians.py"
+    tmux new-session -d -s guardians -c ~/intraday-bot "bash scripts/run_guardians_supervised.sh"
 fi
 
 echo

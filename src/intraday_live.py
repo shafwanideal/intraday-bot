@@ -141,6 +141,19 @@ def load_state() -> dict[str, dict]:
         return json.load(f)
 
 
+def _load_todays_state() -> dict[str, dict]:
+    """State to start a guardian with: today's saved file if this is a same-day restart
+    (e.g. after a crash), otherwise empty. Without this a restart forgot every armed
+    trailing stop and re-armed it from the current price."""
+    try:
+        saved_on = datetime.fromtimestamp(INTRADAY_STATE_FILE.stat().st_mtime, IST).date()
+        if saved_on != _now().date():
+            return {}
+        return load_state()
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
 def save_state(state: dict[str, dict]) -> None:
     with open(INTRADAY_STATE_FILE, "w") as f:
         json.dump(state, f, indent=2)
@@ -353,7 +366,7 @@ def run_intraday_guardian(poll_interval: int = POLL_INTERVAL_SECONDS, notifier=N
     kite = auth.get_kite()
     today = _now().date()
     logger = IntradayLogger(LOG_DIR / f"intraday_manual_{today.isoformat()}.jsonl", notifier=notifier)
-    state: dict[str, dict] = {}
+    state: dict[str, dict] = _load_todays_state()
 
     logger.event("start", tracked=list(state.keys()))
 

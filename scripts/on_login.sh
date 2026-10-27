@@ -20,5 +20,5 @@ fi
 if tmux has-session -t guardians 2>/dev/null; then
     echo "$(stamp) guardians session already running -- leaving it alone"; exit 0
 fi
-tmux new-session -d -s guardians -c "$PWD" "LIVE_TRADING_ENABLED=true .venv/bin/python3 scripts/run_all_guardians.py"
+tmux new-session -d -s guardians -c "$PWD" "LIVE_TRADING_ENABLED=true bash scripts/run_guardians_supervised.sh"
 echo "$(stamp) started guardians session"
