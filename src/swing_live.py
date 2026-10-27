@@ -184,13 +184,70 @@ def _fetch_mtf_positions(kite) -> dict[str, dict] | None:
     found while reasoning through what happens if this runs across a token
     expiry without a fresh login. None lets the caller skip the whole poll
     instead, leaving existing tracked state untouched until the next
-    successful fetch."""
+    successful fetch.
+
+    Reads BOTH books. An MTF buy appears in positions() only on the day it
+    is placed; overnight it settles into holdings() with the quantity under
+    h["mtf"]["quantity"] and h["quantity"] left at 0. Reading positions
+    alone therefore guarded every MTF position for exactly one day and then
+    dropped it at the next open -- on 2026-10-27 that silently abandoned
+    four live positions at 09:15, and would have abandoned all eight in the
+    account over the following mornings. Holdings also states
+    h["mtf"]["initial_margin"] directly, which gives an exact funded amount
+    instead of the order_margins reconstruction."""
     try:
         net = kite.positions().get("net", [])
     except orders.PLACEMENT_EXCEPTIONS as exc:
         print(f"WARNING: could not fetch positions from Kite: {exc}")
         return None
-    return {p["tradingsymbol"]: p for p in net if p.get("product") == orders.PRODUCT_MTF and p.get("quantity", 0) > 0}
+
+    held: dict[str, dict] = {}
+    for p in net:
+        if p.get("product") != orders.PRODUCT_MTF or p.get("quantity", 0) <= 0:
+            continue
+        held[p["tradingsymbol"]] = {
+            "quantity": p["quantity"],
+            "average_price": p["average_price"],
+            "funded_amount": None,  # positions carries no margin figure
+            "source": "positions",
+        }
+
+    # Settled MTF stock is NOT in positions -- see this function's docstring.
+    try:
+        holdings = kite.holdings()
+    except orders.PLACEMENT_EXCEPTIONS as exc:
+        # Same rule as the positions fetch: a partial view is worse than no
+        # view, because every settled holding would look like it was closed.
+        print(f"WARNING: could not fetch holdings from Kite: {exc}")
+        return None
+
+    for h in holdings:
+        mtf = h.get("mtf") or {}
+        qty = mtf.get("quantity", 0) or 0
+        if qty <= 0:
+            continue
+        symbol = h["tradingsymbol"]
+        avg = mtf.get("average_price") or h.get("average_price")
+        value = mtf.get("value") or (qty * (avg or 0))
+        margin = mtf.get("initial_margin")
+        # The broker states the margin outright here, so the funded amount is
+        # exact rather than reconstructed from order_margins.
+        funded = max(0.0, value - margin) if margin is not None else None
+        if symbol in held and held[symbol]["quantity"] != qty:
+            # Both books list it with different sizes. Trust holdings (it is
+            # the settled, authoritative MTF record) but say so, because an
+            # exit sized off the wrong number is the costliest thing here.
+            print(
+                f"WARNING: {symbol} MTF qty differs between books "
+                f"(positions {held[symbol]['quantity']}, holdings {qty}) -- using holdings"
+            )
+        held[symbol] = {
+            "quantity": qty,
+            "average_price": avg,
+            "funded_amount": funded,
+            "source": "holdings",
+        }
+    return held
 
 
 def _fetch_ltp(kite, symbols: list[str]) -> dict[str, float]:
@@ -299,7 +356,13 @@ def check_once(kite, state: dict[str, dict], logger: SwingLogger) -> None:
 
     for symbol, pos in positions.items():
         if symbol not in state:
-            funded_amount = _funded_amount_for_position(kite, symbol, pos["quantity"], pos["average_price"])
+            # holdings states the margin outright; only fall back to the
+            # order_margins reconstruction for a same-day positions row.
+            funded_amount = pos.get("funded_amount")
+            if funded_amount is None:
+                funded_amount = _funded_amount_for_position(
+                    kite, symbol, pos["quantity"], pos["average_price"]
+                )
             if funded_amount is None:
                 logger.event("swing_funded_amount_unavailable", symbol=symbol)
             state[symbol] = {
