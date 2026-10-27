@@ -66,10 +66,11 @@ def main() -> None:
     subprocess.run(["git", "pull", "origin", "main-47itwf"], cwd=PROJECT_ROOT)
 
     print("\n2. Kite login...")
-    if auth.has_valid_session():
-        print("Already logged in for today.")
-    else:
-        auth.login()
+    if not auth.has_valid_session():
+        print("No valid Kite token for today. Log in via your Kite login bookmark, then run this again.")
+        print(f"  {auth._bookmark_url()}")
+        return
+    print("Logged in for today.")
 
     text = " ".join(sys.argv[1:]).strip()
     if not text:

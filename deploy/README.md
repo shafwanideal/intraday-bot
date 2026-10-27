@@ -174,3 +174,34 @@ If the VPS dies outright with positions open, nothing squares them off at
 3:15 — Zerodha's own auto-square-off (around 3:20) becomes your backstop,
 at whatever price it gets. That is the residual risk of running unattended,
 and it is the reason `/status` is worth a glance during the day.
+
+## Kite login listener (bookmark mode)
+
+Replaces the daily SSH tunnel: `kite_login.py serve` stays up on the VPS, and logging in is
+clicking a bookmark. Run these as the user/folder the bot uses, so it writes the same `.env`.
+
+1. **Port 5099 free, and what's already on the box** (read-only checks):
+   ```bash
+   ss -ltnp | grep -E ':(80|443|5099)\b'
+   which nginx pm2 certbot
+   ```
+2. **Listener under PM2** (as `trader`, from `~/intraday-bot`):
+   ```bash
+   pm2 start .venv/bin/python3 --name kite-login-callback --interpreter none -- kite_login.py serve --port 5099
+   pm2 save
+   pm2 startup     # prints one command to run with sudo so it comes back after a reboot
+   ```
+   It listens on `127.0.0.1:5099` only. Check: `curl -s http://127.0.0.1:5099/zerodha_callback_health` -> `ok`.
+3. **DNS + TLS**: an A record for your chosen (sub)domain -> this VPS, then
+   `sudo certbot --nginx -d <your-domain>`.
+4. **nginx**: put `deploy/nginx-kite-callback.conf` inside that domain's `:443` server block, then
+   `sudo nginx -t && sudo systemctl reload nginx`.
+5. **Health URL**: `https://<your-domain>/zerodha_callback_health` must print `ok`.
+6. **Only then** change the Kite app's Redirect URL (developers.kite.trade) to
+   `https://<your-domain>/zerodha_callback`. The tunnel/localhost login stops working from that moment.
+7. Add `KITE_USER_ID=<your Zerodha ID>` to `.env` (restricts the public listener to your account),
+   restart it with `pm2 restart kite-login-callback`, and bookmark
+   `https://kite.zerodha.com/connect/login?api_key=<KITE_API_KEY>&v=3`.
+
+The `serve` listener reads `.env` once at start, so restart it after editing `KITE_API_KEY`/`KITE_USER_ID`
+(the guard itself re-reads `KITE_USER_ID` on every login).

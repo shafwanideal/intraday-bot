@@ -1,7 +1,5 @@
 import json
 import os
-import subprocess
-import sys
 from datetime import date
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -14,9 +12,6 @@ from kiteconnect.exceptions import KiteException
 from . import config
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-# Must match the Redirect URL registered on developers.kite.trade EXACTLY (host, port, path).
-# kite_login.py listens on that port/path, so the Kite console never needs changing.
-REDIRECT_URL = os.environ.get("KITE_REDIRECT_URL", "http://127.0.0.1:8000/")
 
 
 def _load_cached_session() -> str | None:
@@ -73,9 +68,30 @@ def complete_login(raw: str) -> str:
     return access_token
 
 
+def _saved_token() -> str | None:
+    """Today's token as kite_login.py (the always-on listener) last wrote it.
+    Read from .env FRESH each time rather than trusting config.KITE_ACCESS_TOKEN,
+    which is frozen at import: a long-lived process, or a child of daily.py that
+    inherited yesterday's value through os.environ (load_dotenv never overrides),
+    would otherwise keep using a stale token after you log in."""
+    fresh = (dotenv_values(PROJECT_ROOT / ".env").get("KITE_ACCESS_TOKEN") or "").strip()
+    return fresh or config.KITE_ACCESS_TOKEN
+
+
+def _login_hint() -> str:
+    return (
+        f"Log in via your Kite login bookmark ({_bookmark_url()}), "
+        "then run this again. This bot never starts a login itself."
+    )
+
+
+def _bookmark_url() -> str:
+    return f"https://kite.zerodha.com/connect/login?api_key={config.KITE_API_KEY}&v=3"
+
+
 def _token_is_live(token: str) -> bool:
-    """Ask Kite whether a token still works. kite_login.py keeps today's token in
-    .env, so by next morning the saved one is stale -- presence alone proves nothing."""
+    """Ask Kite whether a token still works. It is stale every morning, so its
+    presence in .env proves nothing."""
     try:
         kite = KiteConnect(api_key=config.KITE_API_KEY)
         kite.set_access_token(token)
@@ -86,48 +102,13 @@ def _token_is_live(token: str) -> bool:
 
 
 def has_valid_session() -> bool:
-    """True if get_kite() would succeed without an interactive login, so
-    callers can tell 'needs login' from 'ready' without triggering one.
-
-    An env/.env token only counts if Kite still accepts it (it is stale every
-    morning); otherwise fall back to today's cached session file."""
-    if config.KITE_ACCESS_TOKEN and _token_is_live(config.KITE_ACCESS_TOKEN):
+    """True if get_kite() would succeed, so callers can tell 'needs login' from
+    'ready' without raising. A .env token only counts if Kite still accepts it;
+    otherwise fall back to today's cached session file (the Telegram /login path)."""
+    token = _saved_token()
+    if token and _token_is_live(token):
         return True
     return _load_cached_session() is not None
-
-
-def _adopt_token(access_token: str) -> None:
-    """Make a freshly minted token the one this process (and any subprocess it
-    spawns) uses. config.py read the OLD .env value at import and load_dotenv()
-    never overrides an existing os.environ entry, so without this a child like
-    run_live.py would inherit yesterday's token (same trap as LIVE_TRADING_ENABLED
-    in scripts/daily.py)."""
-    os.environ["KITE_ACCESS_TOKEN"] = access_token
-    config.KITE_ACCESS_TOKEN = access_token
-    _save_session(access_token)
-
-
-def login() -> str:
-    """Daily Kite login via kite_login.py, which listens for Kite's redirect on
-    REDIRECT_URL and writes the new token into .env.
-
-    Meant for the VPS: run it with an SSH tunnel from your own machine
-    (`ssh -L 8000:127.0.0.1:8000 user@vps`) so the browser redirect on your
-    machine reaches the listener here. --no-browser because a headless server
-    has no browser to open (and webbrowser.open can launch a text browser there).
-    The password/2FA are typed by you on Zerodha's own page.
-    """
-    config.require_credentials()
-    script = PROJECT_ROOT / "kite_login.py"
-    result = subprocess.run(
-        [sys.executable, str(script), "login", "--redirect", REDIRECT_URL, "--no-browser"],
-        cwd=PROJECT_ROOT,
-    )
-    token = (dotenv_values(PROJECT_ROOT / ".env").get("KITE_ACCESS_TOKEN") or "").strip()
-    if result.returncode != 0 or not token:
-        raise RuntimeError("Kite login did not complete -- see the output above. Re-run: python3 kite_login.py --redirect " + REDIRECT_URL)
-    _adopt_token(token)
-    return token
 
 
 def _client_from_env_token(access_token: str) -> KiteConnect:
@@ -147,56 +128,47 @@ def _client_from_env_token(access_token: str) -> KiteConnect:
         profile = kite.profile()
     except KiteException as exc:
         raise RuntimeError(
-            f"KITE_ACCESS_TOKEN was rejected by Kite ({exc}). Tokens expire overnight -- "
-            f"run `python3 kite_login.py --redirect {REDIRECT_URL}` to get today's."
+            f"KITE_ACCESS_TOKEN in .env was rejected by Kite ({exc}) -- it is stale (tokens expire "
+            f"overnight). {_login_hint()}"
         ) from exc
     print(f"Using KITE_ACCESS_TOKEN from the environment (authenticated as {profile['user_name']}).")
     return kite
 
 
 def get_kite(interactive: bool = True) -> KiteConnect:
-    """Return an authenticated KiteConnect client.
+    """Return an authenticated KiteConnect client from the token saved in .env.
 
-    Token precedence: a KITE_ACCESS_TOKEN (env var or .env) that Kite still accepts, then today's
-    cached session file, then an interactive login. The env var wins because
-    setting it is a deliberate per-session act -- and in the environments that
-    need it (headless/cloud), the login it would otherwise fall through to
-    can't run at all.
-
-    interactive=False raises instead of prompting at that last step, for
-    callers with no terminal to prompt on (the Telegram control bot, or
-    anything under systemd), where blocking on input() would hang the process
-    forever rather than fail visibly.
+    Token precedence: the KITE_ACCESS_TOKEN in .env (written by the always-on
+    kite_login.py listener when you click the login bookmark), then today's
+    cached session file (the Telegram /login path). If neither works this RAISES
+    with a clear message -- it never starts a login of its own, because a bot
+    (or a scheduled script) blocking on a login nobody is attending is the
+    silent failure to avoid. `interactive` is kept only so existing callers
+    don't change; it no longer does anything.
     """
-    if config.KITE_ACCESS_TOKEN:
+    token = _saved_token()
+    if token:
         try:
-            return _client_from_env_token(config.KITE_ACCESS_TOKEN)
-        except RuntimeError as exc:
-            if not interactive:
+            return _client_from_env_token(token)
+        except RuntimeError:
+            cached = _load_cached_session()
+            if not cached:
                 raise
-            print(f"{exc}\nSaved token is stale -- logging in again.")
+            token = cached
+    else:
+        token = _load_cached_session()
+        if not token:
+            raise RuntimeError(f"No Kite token saved for today. {_login_hint()}")
 
-    config.require_credentials()
+    config.require_api_key()
     kite = KiteConnect(api_key=config.KITE_API_KEY)
-
-    access_token = _load_cached_session()
-    if not access_token:
-        if not interactive:
-            raise RuntimeError(
-                "No valid Kite session for today and no terminal to log in from. "
-                "Send /login to the Telegram bot, or run `python3 -m src.auth` on the server."
-            )
-        access_token = login()
-
-    kite.set_access_token(access_token)
+    kite.set_access_token(token)
     return kite
 
 
 if __name__ == "__main__":
     import sys
 
-    if not has_valid_session():
-        login()
     client = get_kite()
     profile = client.profile()
     print(f"Authenticated as {profile['user_name']} ({profile['user_id']})")

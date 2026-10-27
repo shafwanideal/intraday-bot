@@ -19,8 +19,8 @@
 # this script later in the day must never silently wipe live tracking state
 # for a position that's already armed.
 #
-# Run today's Kite login FIRST (kite_login.py over an SSH tunnel -- see README), so the
-# guardians find a live token already in .env and don't wait on a login themselves.
+# Click your Kite login bookmark FIRST (see README, "Bookmark mode") so the guardians find
+# a live token in .env; they never start a login themselves and stop with a clear message.
 
 set -e
 cd ~/intraday-bot
@@ -62,7 +62,5 @@ else
 fi
 
 echo
-echo "Done. If today's Kite login isn't done yet, run it BEFORE starting the guardians:"
-echo "  (Mac)  ssh -L 8000:127.0.0.1:8000 root@<vps-ip>"
-echo "  (VPS)  .venv/bin/python3 kite_login.py --redirect http://127.0.0.1:8000/ --no-browser"
+echo "Done. If today's Kite login isn't done yet, click your Kite login bookmark BEFORE the guardians start."
 echo "Then: tmux attach -t guardians   # Ctrl+B D to detach"

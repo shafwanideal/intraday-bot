@@ -204,7 +204,7 @@ def check_kite_session() -> None:
         # normal at 8 AM and only a problem once you actually want to trade.
         warn(
             "No Kite session for today yet",
-            "Normal before your morning login. Send /login to the Telegram bot when you're ready to trade.",
+            "Normal before your morning login. Click your Kite login bookmark when you're ready to trade.",
         )
         return
 
@@ -215,7 +215,7 @@ def check_kite_session() -> None:
     except Exception as exc:  # noqa: BLE001
         fail(
             f"A session exists but Kite rejected it: {exc}",
-            "The token has probably expired. Send /login to the Telegram bot for a fresh one.",
+            "The token has probably expired. Click your Kite login bookmark for a fresh one.",
         )
 
 

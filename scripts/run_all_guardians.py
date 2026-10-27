@@ -27,13 +27,10 @@ from src.swing_live import run_swing_guardian  # noqa: E402
 
 
 def main() -> None:
-    # One login for the whole run, if today's session isn't already cached.
-    # Under systemd there is no terminal, so prompting would block the
-    # process forever on input() and the guardians would never start --
-    # silently, which is the worst possible failure for something whose job
-    # is to place exits. Prompt only when actually attached to a tty;
-    # otherwise raise, let systemd log it and back off, and log in with
-    # `python3 -m src.auth` (or /login on Telegram) before starting.
+    # Reads today's token from .env (written when you click the Kite login bookmark) and
+    # RAISES with a clear 'log in via the bookmark' message if it's missing or stale --
+    # the bot never starts a login itself, so nothing can sit blocked on input() under
+    # tmux/systemd and silently never start the guardians.
     auth.get_kite(interactive=sys.stdin.isatty())
 
     notifier = telegram_notify.send_message if telegram_notify.enabled() else None

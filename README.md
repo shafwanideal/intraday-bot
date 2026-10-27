@@ -26,31 +26,27 @@ toolchain installed.
 
 ## Authenticate
 
-Kite access tokens expire daily, so this is done once each trading morning with
-`kite_login.py`, which runs **on the VPS** and catches Kite's redirect through an SSH
-tunnel from your own machine (the Kite app's Redirect URL stays `http://127.0.0.1:8000/`):
+Kite access tokens expire daily and need a real password + 2FA login. That login is a
+**bookmark click**: `kite_login.py serve` runs permanently on the VPS (under PM2), behind
+nginx on an HTTPS address that is registered as the Kite app's Redirect URL. Every
+successful login writes `KITE_ACCESS_TOKEN` into the VPS `.env` (mode 600, gitignored).
 
-```bash
-# on your Mac -- opens the tunnel (leave this window open until login finishes)
-ssh -L 8000:127.0.0.1:8000 root@<vps-ip>
+Bookmark: `https://kite.zerodha.com/connect/login?api_key=<KITE_API_KEY>&v=3`
+(the API key is not secret; `kite_login.py serve` prints this URL when it starts).
 
-# on the VPS, as the bot user
-sudo -iu trader
-cd ~/intraday-bot
-.venv/bin/python3 kite_login.py --redirect http://127.0.0.1:8000/ --no-browser
-```
+The bot only **reads** that token. If it is missing or stale, `daily.py`, the guardians
+and `get_kite()` stop with a "log in via your Kite login bookmark" message -- they never
+start a login themselves. Click the bookmark first, then start them. Verify any time with
+`.venv/bin/python3 kite_login.py check`.
 
-It prints a Zerodha login URL; open it in your Mac's browser and log in (password + 2FA are
-typed by you on Zerodha's page). Kite redirects to `127.0.0.1:8000` on your Mac, the tunnel
-carries that to the VPS, and the script saves `KITE_ACCESS_TOKEN` into the VPS `.env`
-(mode 600, gitignored). Verify any time with `kite_login.py check`. Everything else
-(`daily.py`, the guardians, `get_kite()`) reads that token, and re-runs this same login
-automatically if the saved one has gone stale. Do the login **before** starting the guardians.
+Set `KITE_USER_ID=<your Zerodha ID>` in `.env` so the public listener only accepts a login
+for your own account (the API key is public, so otherwise anyone could log in to the app
+with a different Zerodha account and overwrite the saved token).
 
-Port 8000 must be free on the VPS while it runs -- nothing else in this repo listens on it.
-
-The same `.env` also needs `KITE_API_KEY` and `KITE_API_SECRET`; `KITE_REDIRECT_URL`
-overrides the default redirect if yours differs.
+Server setup (once): see `deploy/README.md`, "Kite login listener (bookmark mode)".
+The one-off/tunnel alternative still works while the Redirect URL is
+`http://127.0.0.1:8000/`: `ssh -L 8000:127.0.0.1:8000 root@<vps>` then
+`kite_login.py --redirect http://127.0.0.1:8000/ --no-browser` on the VPS.
 
 ## Pre-flight check
 
