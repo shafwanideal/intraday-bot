@@ -36,13 +36,21 @@ print("=" * 78)
 print("HOLDINGS   -- kite.holdings()           (NOT read by any guardian)")
 print("=" * 78)
 try:
-    hold = [h for h in kite.holdings() if h.get("quantity", 0) or h.get("t1_quantity", 0)]
-    if not hold:
-        print("  (empty)")
+    hold = kite.holdings()
+    print(f"  {len(hold)} rows returned")
     for h in hold:
-        print(f"  {h['tradingsymbol']:<14}{h.get('product',''):<6}"
-              f"qty {h.get('quantity', 0):>6}  t1 {h.get('t1_quantity', 0):>5}"
-              f"  avg {h.get('average_price', 0):>10,.2f}")
+        # MTF quantity is NOT in h["quantity"] -- it sits in a separate
+        # field (Kite's UI shows it as "M: 30"). Print every quantity-ish
+        # field so the real one is unambiguous.
+        qty_fields = {k: v for k, v in h.items()
+                      if "quantity" in k.lower() or k.lower() == "mtf"}
+        print(f"  {h['tradingsymbol']:<13} avg {h.get('average_price', 0):>9,.2f}"
+              f"  ltp {h.get('last_price', 0):>9,.2f}")
+        print(f"      {qty_fields}")
+    if hold:
+        print()
+        print("  --- ALL KEYS on the first holding, for reference ---")
+        print(f"  {sorted(hold[0].keys())}")
 except Exception as exc:  # noqa: BLE001
     print(f"  could not fetch holdings: {exc}")
 
