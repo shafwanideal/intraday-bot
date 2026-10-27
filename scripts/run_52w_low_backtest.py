@@ -18,9 +18,8 @@ Usage: python3 scripts/run_52w_low_backtest.py [capital_per_leg] [lookback_tradi
   trigger: 52w_low (default) | rsi_dip -- rsi_dip enters on RSI(14)<=30 while price
     is still above its 200-day EMA (a real uptrend), instead of any fresh 52-week low
     regardless of the stock's underlying trend.
-  source: yahoo (default) | kite -- where the daily bars come from. Only daily bars
-    are needed here, and Yahoo serves those free and unauthenticated, so this runs
-    anywhere; kite needs a same-day interactive login (python3 -m src.auth).
+  source: kite (the only source) -- daily bars come from your Kite Connect app, so
+    today's login must be done first (click the Kite login bookmark).
 """
 
 import sys
@@ -29,13 +28,13 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from src import kite_data, screener, swing_backtest, swing_strategy, yahoo_daily
+from src import kite_data, screener, swing_backtest, swing_strategy
 
 DEFAULT_CAPITAL_PER_LEG = 200_000
 DEFAULT_LOOKBACK_TRADING_DAYS = 60  # window over which NEW entries are allowed
 DEFAULT_UNIVERSE = "nifty50"
 DEFAULT_TRIGGER = "52w_low"
-DEFAULT_SOURCE = "yahoo"
+DEFAULT_SOURCE = "kite"
 DAILY_HISTORY_DAYS = 850  # covers up to a 1-year (~252 trading day) entry window + the 252-day lookback + buffer
 ATR_MULTIPLIER = 0.5
 
@@ -52,8 +51,7 @@ TRIGGER_SCREENERS = {
 
 # (fetch_daily(symbol, days=...) -> DataFrame, inter-request delay seconds)
 DATA_SOURCES = {
-    "yahoo": (yahoo_daily.fetch_daily, yahoo_daily.REQUEST_DELAY_SECONDS),
-    "kite": (kite_data.fetch_daily, kite_data.REQUEST_DELAY_SECONDS),
+    "kite": (kite_data.fetch_daily_cached, kite_data.REQUEST_DELAY_SECONDS),
 }
 
 TRIGGER_LABELS = {

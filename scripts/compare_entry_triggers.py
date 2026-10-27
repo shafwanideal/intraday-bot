@@ -25,7 +25,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from src import screener, swing_backtest, swing_strategy, yahoo_daily
+from src import kite_data, screener, swing_backtest, swing_strategy
 
 DEFAULT_CAPITAL_PER_LEG = 200_000
 DEFAULT_LOOKBACK_TRADING_DAYS = 252
@@ -61,8 +61,8 @@ def main() -> None:
 
     symbols = UNIVERSE_LOADERS[universe]()
     print(f"Universe: {len(symbols)} {universe} symbols")
-    print(f"Fetching {DAILY_HISTORY_DAYS}d of daily bars (Yahoo, cached per day) ...")
-    daily_data = yahoo_daily.fetch_daily_many(symbols, days=DAILY_HISTORY_DAYS)
+    print(f"Fetching {DAILY_HISTORY_DAYS}d of daily bars (Kite, cached per day) ...")
+    daily_data = kite_data.fetch_daily_many(symbols, days=DAILY_HISTORY_DAYS)
     print(f"Got data for {len(daily_data)}/{len(symbols)} symbols")
 
     all_dates = swing_backtest.trading_dates(daily_data)

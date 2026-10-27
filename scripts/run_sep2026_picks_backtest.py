@@ -1,11 +1,8 @@
 """Backtest for Shafwan's own dated stock picks, 2026-09-07 through 2026-09-18,
 as given directly ("do back test for the following ... do it for these dates").
 
-Data source is Yahoo (login-free) rather than Kite: this environment has no
-Kite session/token, and Yahoo's chart API needs neither. See
-`src.yahoo_intraday`'s own module docstring for the tradeoffs that implies
-(different vendor's prices than the bot actually trades on, 5-min history
-only goes back ~60 days, last bar or two of a live session can be missing).
+Data source is Kite (the same feed the bot trades on), so today's login --
+the Kite login bookmark -- must be done before running this.
 
 Direction defaults to "long" for any symbol the user didn't explicitly mark
 "short" -- matching STRATEGY.md's stated convention ("every stock is traded
@@ -39,7 +36,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from src import backtest, yahoo_intraday
+from src import backtest, kite_data
 from src.strategy import compute_daily_loss_cap, compute_portfolio_profit_lock_trigger
 
 # symbol -> (yahoo/NSE ticker, resolved company name, as confirmed via Yahoo's own meta)
@@ -123,8 +120,7 @@ ALL_SYMBOLS = sorted({sym for day_plan in DAILY_PLAN.values() for sym in day_pla
 
 CAVEATS = """
 CAVEATS (read before acting on these numbers):
-- Data: Yahoo Finance 5-minute bars (login-free), NOT Kite -- this environment has no
-  Kite session. Expect small price differences from the feed the bot actually trades on.
+- Data: Kite 5-minute bars, the same feed the bot trades on (needs today's login).
 - Direction defaults to "long" for every pick the request didn't mark "short" --
   matching STRATEGY.md's stated convention.
 - "GE Vernova" (8 Sep) is EXCLUDED -- no NSE listing found for it, see module docstring.
@@ -145,14 +141,14 @@ CAVEATS (read before acting on these numbers):
   live checks every 1 second, so an intrabar spike through a level is invisible here.
 - Transaction costs ARE modeled (brokerage, STT, exchange charges, SEBI charges, stamp
   duty, GST) on the leveraged order value. Slippage is NOT modeled.
-- 18 Sep is today -- if the session isn't fully over yet, or a symbol's last bar or two
-  hasn't posted on Yahoo, that day's numbers can still move.
+- 18 Sep is today -- if the session isn't fully over yet, that day's numbers can still move.
 """
 
 
 def main() -> None:
-    print(f"Fetching Yahoo 5-min intraday bars for {ALL_SYMBOLS} ...")
-    bars = yahoo_intraday.fetch_many(ALL_SYMBOLS, period="30d", interval="5m")
+    print(f"Fetching Kite 5-min intraday bars for {ALL_SYMBOLS} ...")
+    # 60 days back so the Sep 7-18 picks still fall inside the window when this is re-run later.
+    bars = kite_data.fetch_many(ALL_SYMBOLS, days=60, interval="5minute")
 
     missing = [s for s in ALL_SYMBOLS if s not in bars]
     if missing:

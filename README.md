@@ -93,22 +93,16 @@ Needs `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` in `.env`.
 ```bash
 python3 scripts/run_backtest.py              # generic sample-symbol backtest
 python3 scripts/run_daily_plan_backtest.py   # backtest specific (date, symbol) picks you actually made
-python3 scripts/run_bse_today_backtest.py    # one stock, one day (BSE long), no Kite login needed
+python3 scripts/run_bse_today_backtest.py    # one stock, one day (BSE long)
 ```
 
-Uses free Yahoo Finance 5-min intraday data (last ~60 days only) via
-`src/data.py`, and `src/strategy.py`'s `GridEngine` for the actual grid
+Uses Kite Connect 5-min intraday data via `src/kite_data.py`, and `src/strategy.py`'s `GridEngine` for the actual grid
 logic (2% averaging/exit by default, 5x leverage, real Zerodha intraday
 costs, mark-to-market daily loss cap). Edit `DAILY_PLAN` in
 `scripts/run_daily_plan_backtest.py` to test your own dated picks.
 
 These read Kite's feed — the same one live/shadow mode trades on — so they
-need a same-day token (see Authenticate above). `scripts/run_bse_today_backtest.py`
-also takes `--source yahoo`, which falls back to `src/yahoo_intraday.py`
-(Yahoo's chart endpoint over plain `requests`, same DataFrame shape as
-`src/kite_data.py`, including a 14-day ATR helper) when no token is available
-at all. That's a different vendor's prices, so numbers won't match live mode
-exactly — the script says which source it used.
+need a same-day token (click the Kite login bookmark first, see Authenticate above).
 
 ### Swing backtests (entry triggers)
 
@@ -124,12 +118,11 @@ python3 scripts/run_52w_low_backtest.py 200000 252 nifty50 1500000 rsi_dip
 Args are positional: capital per leg, entry-window length in trading days,
 universe (`nifty50` | `nifty200` | `nifty500`), max total capital (`none`
 for uncapped), and for the single-trigger script a trigger (`52w_low` |
-`rsi_dip`) and source (`yahoo` | `kite`).
+`rsi_dip`) and source (`kite`, the only one).
 
-These need only **daily** bars, which Yahoo serves free and without auth via
-`src/yahoo_daily.py` — so unlike the intraday backtests they run with no Kite
-login at all. Bars are cached under `.cache/` per fetch-date, so re-running
-with different strategy parameters doesn't re-download the universe.
+These need only **daily** bars, fetched from Kite via `src/kite_data.py`, so
+today's Kite login is required. Bars are cached under `.cache/` per fetch-date,
+so re-running with different strategy parameters doesn't re-download the universe.
 
 ## Shadow mode (paper trading against live data)
 

@@ -11,8 +11,7 @@ an apples-to-apples score.
 
 Usage: python3 scripts/run_weekly_support_bounce_history.py [universe] [source] [lookback_weeks] [days]
   universe: nifty50 | nifty200 (default) | nifty500
-  source: yahoo (default, free & unauthenticated) | kite (needs a same-day
-    `python3 -m src.auth` login, or KITE_ACCESS_TOKEN set in the environment)
+  source: kite (the only source; needs today's login -- click the Kite login bookmark)
   lookback_weeks: weeks of prior history each support floor is drawn from (default 10)
   days: daily bars of history to pull per symbol (default 900, ~2.5 years)
 """
@@ -23,10 +22,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from src import kite_data, screener, weekly_support, yahoo_daily
+from src import kite_data, screener, weekly_support
 
 DEFAULT_UNIVERSE = "nifty200"
-DEFAULT_SOURCE = "yahoo"
+DEFAULT_SOURCE = "kite"
 DEFAULT_DAYS = 900
 
 UNIVERSE_LOADERS = {
@@ -37,8 +36,7 @@ UNIVERSE_LOADERS = {
 
 # (fetch_daily(symbol, days=...) -> DataFrame, inter-request delay seconds)
 DATA_SOURCES = {
-    "yahoo": (yahoo_daily.fetch_daily, yahoo_daily.REQUEST_DELAY_SECONDS),
-    "kite": (kite_data.fetch_daily, kite_data.REQUEST_DELAY_SECONDS),
+    "kite": (kite_data.fetch_daily_cached, kite_data.REQUEST_DELAY_SECONDS),
 }
 
 

@@ -16,8 +16,8 @@ A "bounce" is a week that:
      closed near its own low (still weak / possibly still breaking down).
 
 Source-agnostic: works on any (symbol -> daily OHLC DataFrame) dict, whether
-the bars came from `src.kite_data.fetch_daily` or `src.yahoo_daily.fetch_daily`
--- same DataFrame shape (Open/High/Low/Close/Volume, DatetimeIndex) either way.
+the bars came from `src.kite_data.fetch_daily`
+(Open/High/Low/Close/Volume, DatetimeIndex).
 """
 
 import pandas as pd

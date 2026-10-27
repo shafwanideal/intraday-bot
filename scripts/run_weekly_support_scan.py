@@ -7,8 +7,7 @@ latest available daily bar, for you to go look at the chart.
 
 Usage: python3 scripts/run_weekly_support_scan.py [universe] [source] [lookback_weeks]
   universe: nifty50 | nifty200 (default) | nifty500
-  source: yahoo (default, free & unauthenticated) | kite (needs a same-day
-    `python3 -m src.auth` login, or KITE_ACCESS_TOKEN set in the environment)
+  source: kite (the only source; needs today's login -- click the Kite login bookmark)
   lookback_weeks: weeks of prior history the support floor is drawn from (default 10)
 """
 
@@ -18,10 +17,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from src import kite_data, screener, weekly_support, yahoo_daily
+from src import kite_data, screener, weekly_support
 
 DEFAULT_UNIVERSE = "nifty200"
-DEFAULT_SOURCE = "yahoo"
+DEFAULT_SOURCE = "kite"
 DAILY_HISTORY_DAYS = 400  # comfortably covers lookback_weeks=10 + the tested week + buffer
 
 UNIVERSE_LOADERS = {
@@ -32,8 +31,7 @@ UNIVERSE_LOADERS = {
 
 # (fetch_daily(symbol, days=...) -> DataFrame, inter-request delay seconds)
 DATA_SOURCES = {
-    "yahoo": (yahoo_daily.fetch_daily, yahoo_daily.REQUEST_DELAY_SECONDS),
-    "kite": (kite_data.fetch_daily, kite_data.REQUEST_DELAY_SECONDS),
+    "kite": (kite_data.fetch_daily_cached, kite_data.REQUEST_DELAY_SECONDS),
 }
 
 

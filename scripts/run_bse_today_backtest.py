@@ -60,11 +60,8 @@ CAVEATS = """
 CAVEATS (read before acting on these numbers):
 - ONE trading day and ONE stock. This says what happened today, and nothing
   at all about whether the pick or the strategy is any good.
-- Data is Kite's, the same feed live/shadow mode trades on, as long as this
-  runs with a same-day token (python3 -m src.auth, or a KITE_ACCESS_TOKEN env
-  var in an environment that can't run that login). --source yahoo is a
-  fallback for when neither is available: a different vendor's prices, whose
-  last bar or two of a session can be missing, so expect small differences.
+- Data is Kite's, the same feed live/shadow mode trades on, and needs today's
+  login (click the Kite login bookmark first).
 - Entry is at today's real 9:15 open, one unit, no entry filter -- the
   backtest assumes the decision to be long BSE today was already made.
 - Trigger levels are evaluated on each 5-min bar's CLOSE, not tick by tick,
@@ -83,44 +80,26 @@ CAVEATS (read before acting on these numbers):
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument(
-        "--source",
-        choices=("kite", "yahoo"),
-        default="kite",
-        help="Bar source. 'kite' (default) is the same feed the bot trades on, and needs either a "
-        "same-day login (python3 -m src.auth) or a KITE_ACCESS_TOKEN env var. 'yahoo' needs "
-        "neither, but is a different vendor's prices.",
-    )
-    parser.add_argument(
         "--date",
         type=date.fromisoformat,
         default=date.today(),
-        help="Trading day to simulate, YYYY-MM-DD (default: today). Yahoo only keeps ~60 days of 5-min bars.",
+        help="Trading day to simulate, YYYY-MM-DD (default: today). Must fall inside the fetched 10-day window.",
     )
     return parser.parse_args()
 
 
-def load_bars(source: str, day: date) -> tuple[dict, dict]:
-    if source == "kite":
-        from src import kite_data
+def load_bars(day: date) -> tuple[dict, dict]:
+    from src import kite_data
 
-        try:
-            # A window, not a single day: Kite's intraday endpoint is fetched in
-            # chunks and `day` still has to fall inside it.
-            bars = kite_data.fetch_many([SYMBOL], days=10, interval="5minute")
-            return bars, kite_data.fetch_symbol_atr([SYMBOL])
-        except RuntimeError as exc:
-            # Missing credentials or a dead token. Both are a setup problem with a
-            # known fix, so say the fix instead of dumping a traceback -- and point
-            # at the fallback rather than leaving the run with nothing.
-            print(f"\nCan't reach Kite: {exc}")
-            print("\nFix that, or re-run with --source yahoo for a login-free (different-vendor) feed.")
-            sys.exit(1)
-
-    from src import yahoo_intraday
-
-    lookback_days = max((date.today() - day).days + 5, 5)
-    bars = yahoo_intraday.fetch_many([SYMBOL], period=f"{lookback_days}d", interval="5m")
-    return bars, yahoo_intraday.fetch_symbol_atr([SYMBOL])
+    try:
+        # A window, not a single day: Kite's intraday endpoint is fetched in
+        # chunks and `day` still has to fall inside it.
+        bars = kite_data.fetch_many([SYMBOL], days=10, interval="5minute")
+        return bars, kite_data.fetch_symbol_atr([SYMBOL])
+    except RuntimeError as exc:
+        # Missing credentials or a stale token: a setup problem with a known fix.
+        print(f"\nCan't reach Kite: {exc}")
+        sys.exit(1)
 
 
 def print_trades(results: dict) -> None:
@@ -141,8 +120,8 @@ def main() -> None:
     day = args.date
     daily_plan = {day: {SYMBOL: DIRECTION}}
 
-    print(f"Fetching 5-min bars for {SYMBOL} from {args.source} ...")
-    bars, symbol_atr = load_bars(args.source, day)
+    print(f"Fetching 5-min bars for {SYMBOL} from Kite ...")
+    bars, symbol_atr = load_bars(day)
     if SYMBOL not in bars:
         print(f"No data fetched for {SYMBOL}. Aborting.")
         sys.exit(1)
