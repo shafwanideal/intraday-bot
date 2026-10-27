@@ -52,6 +52,14 @@ guardians' own process -- `.env` is not changed -- and the guardians can only ev
 orders. Its output goes to `logs/on_login.log`. After pulling this change, run
 `pm2 restart kite-login-callback` once so the listener loads it.
 
+**Phone alerts (Telegram).** Needs a working `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID` in `.env`
+(test with `.venv/bin/python3 scripts/send_alert.py --test`). You get a message when: a trailing
+stop starts, anything is sold (trailing stop or the 15:08 square-off), a position is picked up or
+closed outside the bot, the guardians stop and again when they are back up, the login listener goes
+down / comes back, and when the Kite login is still not done at 08:30 (reminders every 10 minutes
+until 09:30, then "login received"). The last three come from `scripts/monitor.py`, run under PM2:
+`pm2 start .venv/bin/python3 --name algo-monitor --interpreter none -- scripts/monitor.py && pm2 save`.
+
 Server setup (once): see `deploy/README.md`, "Kite login listener (bookmark mode)".
 The one-off/tunnel alternative still works while the Redirect URL is
 `http://127.0.0.1:8000/`: `ssh -L 8000:127.0.0.1:8000 root@<vps>` then

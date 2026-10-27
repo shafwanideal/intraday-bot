@@ -51,7 +51,7 @@ from datetime import datetime, time
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from . import auth, config, orders
+from . import alerts, auth, config, orders
 from .live import TODAYS_STOCKS_FILE
 from .strategy import (
     GRID_PCT,
@@ -119,7 +119,7 @@ class IntradayLogger:
         with open(self.log_path, "a") as f:
             f.write(json.dumps(record, default=str) + "\n")
         if kind in self.NOTIFY_KINDS:
-            self._notify(f"{kind}: {fields}")
+            self._notify(alerts.format_event(kind, fields, label="Intraday"))
 
     def critical(self, message: str, **fields) -> None:
         banner = "!" * 70

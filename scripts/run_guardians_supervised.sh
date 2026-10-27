@@ -12,9 +12,16 @@ cd "$(dirname "$0")/.." || exit 1
 mkdir -p logs
 DELAY="${GUARDIAN_RESTART_DELAY:-15}"
 trap 'echo "stopping supervisor"; exit 0' INT TERM
+mkdir -p .cache
 while true; do
     .venv/bin/python3 scripts/run_all_guardians.py
     rc=$?
+    # One alert per outage, not one every 15 seconds. run_all_guardians clears the marker and
+    # sends "back up" once it is running again.
+    if [ ! -f .cache/guardians_down ]; then
+        touch .cache/guardians_down
+        .venv/bin/python3 scripts/send_alert.py "🔴 Guardians STOPPED (exit code $rc). Restarting automatically every ${DELAY}s. If you have not logged in today, click the Kite login bookmark." >/dev/null 2>&1 || true
+    fi
     echo "$(date '+%Y-%m-%d %H:%M:%S') run_all_guardians exited (code $rc) -- restarting in ${DELAY}s" | tee -a logs/guardians_supervisor.log
     sleep "$DELAY"
 done

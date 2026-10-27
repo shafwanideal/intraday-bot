@@ -35,6 +35,14 @@ def main() -> None:
 
     notifier = telegram_notify.send_message if telegram_notify.enabled() else None
 
+    # Tell the phone we're up -- as "back up" if the supervisor flagged a crash/outage first.
+    down_marker = Path(__file__).resolve().parent.parent / ".cache" / "guardians_down"
+    if notifier:
+        was_down = down_marker.exists()
+        notifier("✅ Guardians are BACK UP (swing + intraday) after going down." if was_down
+                 else "✅ Guardians are running (swing + intraday).")
+    down_marker.unlink(missing_ok=True)
+
     swing_thread = threading.Thread(
         target=run_swing_guardian,
         kwargs={"poll_interval": SWING_POLL_INTERVAL_SECONDS, "notifier": notifier},
