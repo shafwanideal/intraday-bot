@@ -40,6 +40,9 @@ from .swing_strategy import PROFIT_TARGET_PCT, compute_mtf_breakeven_pct
 
 STATE_FILE = PROJECT_ROOT / "groww_swing_state.json"
 POLL_INTERVAL_SECONDS = 30
+
+# See swing_live.MISSING_POLLS_BEFORE_DROP -- same reasoning, same fix.
+MISSING_POLLS_BEFORE_DROP = 3
 TRAIL_PCT = float(os.getenv("GROWW_TRAIL_PCT", "0.015"))
 MAX_BAR_AGE_MINUTES = 10
 RELOGIN_AFTER_FAILURES = 3
@@ -164,9 +167,16 @@ def check_once(g, state: dict[str, dict], logger: SwingLogger) -> bool:
         return False
 
     for symbol in list(state):
-        if symbol not in positions:
-            logger.event("swing_position_closed_externally", symbol=symbol)
-            del state[symbol]
+        if symbol in positions:
+            state[symbol]["missing_polls"] = 0
+            continue
+        missed = state[symbol].get("missing_polls", 0) + 1
+        state[symbol]["missing_polls"] = missed
+        if missed < MISSING_POLLS_BEFORE_DROP:
+            logger.event("swing_position_missing_unconfirmed", symbol=symbol, poll=missed)
+            continue
+        logger.event("swing_position_closed_externally", symbol=symbol)
+        del state[symbol]
 
     for symbol, pos in positions.items():
         st = state.get(symbol)
@@ -174,7 +184,7 @@ def check_once(g, state: dict[str, dict], logger: SwingLogger) -> bool:
             state[symbol] = {
                 "trailing": False, "peak_price": None, "entry_date": today.isoformat(),
                 "funded_amount": _funded_amount(pos), "last_qty": pos["quantity"],
-                "exit_sent": False, "alerted": False,
+                "exit_sent": False, "alerted": False, "missing_polls": 0,
             }
             logger.event("swing_position_detected", symbol=symbol, qty=pos["quantity"], avg_price=pos["average_price"])
         elif pos["quantity"] != st.get("last_qty"):

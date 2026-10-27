@@ -73,6 +73,11 @@ LOG_DIR = PROJECT_ROOT / "logs"
 MARKET_OPEN = time(9, 15)
 MARKET_CLOSE = time(15, 30)
 TRAIL_PCT = GRID_PCT / 2  # 0.75% -- matches live.py's own un-overridden default exactly
+# Same confirmation rule as swing_live.MISSING_POLLS_BEFORE_DROP -- a single
+# 200-OK-but-empty position book (normal in the seconds right after 09:15)
+# must not be read as "every tracked position was closed".
+MISSING_POLLS_BEFORE_DROP = 3
+
 POLL_INTERVAL_SECONDS = 5  # faster than swing (intraday moves faster), but see the
 # --poll-interval usage note in scripts/run_intraday_live.py about combined rate
 # limits if run_live.py's own 1s loop is ALSO polling kite.quote() at the same time.
@@ -238,9 +243,16 @@ def check_once(kite, state: dict[str, dict], logger: IntradayLogger) -> None:
         return
 
     for symbol in list(state.keys()):
-        if symbol not in positions:
-            logger.event("intraday_position_closed_externally", symbol=symbol)
-            del state[symbol]
+        if symbol in positions:
+            state[symbol]["missing_polls"] = 0
+            continue
+        missed = state[symbol].get("missing_polls", 0) + 1
+        state[symbol]["missing_polls"] = missed
+        if missed < MISSING_POLLS_BEFORE_DROP:
+            logger.event("intraday_position_missing_unconfirmed", symbol=symbol, poll=missed)
+            continue
+        logger.event("intraday_position_closed_externally", symbol=symbol)
+        del state[symbol]
 
     for symbol, pos in positions.items():
         if symbol not in state:
@@ -251,6 +263,7 @@ def check_once(kite, state: dict[str, dict], logger: IntradayLogger) -> None:
                 "peak_price": None,
                 "armed_activation_pct": None,
                 "trailing_activated_at": None,
+                "missing_polls": 0,
             }
             logger.event(
                 "intraday_position_detected", symbol=symbol, direction=direction, qty=abs(pos["quantity"]), avg_price=pos["average_price"]

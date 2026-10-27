@@ -27,7 +27,14 @@ from src.swing_live import run_swing_guardian  # noqa: E402
 
 
 def main() -> None:
-    auth.get_kite()  # the one login prompt for the whole run, if today's session isn't already cached
+    # One login for the whole run, if today's session isn't already cached.
+    # Under systemd there is no terminal, so prompting would block the
+    # process forever on input() and the guardians would never start --
+    # silently, which is the worst possible failure for something whose job
+    # is to place exits. Prompt only when actually attached to a tty;
+    # otherwise raise, let systemd log it and back off, and log in with
+    # `python3 -m src.auth` (or /login on Telegram) before starting.
+    auth.get_kite(interactive=sys.stdin.isatty())
 
     notifier = telegram_notify.send_message if telegram_notify.enabled() else None
 
@@ -47,7 +54,7 @@ def main() -> None:
     swing_thread.start()
     intraday_thread.start()
 
-    print("Both guardians are running in this one terminal. Ctrl+C stops both.")
+    print("Both guardians are running. Ctrl+C stops both.", flush=True)
     try:
         # Plain .join() would block the main thread uninterruptibly on POSIX
         # once both targets are daemon threads sleeping in time.sleep(); a

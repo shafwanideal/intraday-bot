@@ -79,6 +79,22 @@ MARKET_CLOSE = time(15, 30)
 # rate limit while still noticing an intraday trailing-stop breach promptly.
 POLL_INTERVAL_SECONDS = 30
 
+# A symbol must be absent from this many CONSECUTIVE successful position
+# fetches before it is treated as closed and dropped from tracking.
+#
+# _fetch_mtf_positions already returns None (not {}) when the API call
+# raises, so a timeout or an expired token skips the poll harmlessly. What
+# that does not cover is Kite answering 200 OK with a net book that has not
+# populated yet -- which is a normal condition in the first seconds after
+# 09:15. That is indistinguishable from "you hold nothing", and on
+# 2026-10-27 it silently dropped four live MTF positions at 09:15:09-13,
+# leaving them with no trailing stop for the rest of the session.
+#
+# Requiring confirmation costs nothing: a position that really was closed
+# just leaves tracking POLL_INTERVAL_SECONDS x this many seconds later, and
+# nothing acts on it in the meantime.
+MISSING_POLLS_BEFORE_DROP = 3
+
 
 def _now() -> datetime:
     return datetime.now(IST)
@@ -268,9 +284,18 @@ def check_once(kite, state: dict[str, dict], logger: SwingLogger) -> None:
         return
 
     for symbol in list(state.keys()):
-        if symbol not in positions:
-            logger.event("swing_position_closed_externally", symbol=symbol)
-            del state[symbol]
+        if symbol in positions:
+            state[symbol]["missing_polls"] = 0
+            continue
+        missed = state[symbol].get("missing_polls", 0) + 1
+        state[symbol]["missing_polls"] = missed
+        if missed < MISSING_POLLS_BEFORE_DROP:
+            # Absent, but not yet confirmed -- keep guarding it. See
+            # MISSING_POLLS_BEFORE_DROP for why one empty book is not proof.
+            logger.event("swing_position_missing_unconfirmed", symbol=symbol, poll=missed)
+            continue
+        logger.event("swing_position_closed_externally", symbol=symbol)
+        del state[symbol]
 
     for symbol, pos in positions.items():
         if symbol not in state:
@@ -284,6 +309,7 @@ def check_once(kite, state: dict[str, dict], logger: SwingLogger) -> None:
                 "entry_date": today.isoformat(),
                 "funded_amount": funded_amount,
                 "last_qty": pos["quantity"],
+                "missing_polls": 0,
             }
             logger.event(
                 "swing_position_detected",

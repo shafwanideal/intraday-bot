@@ -1,0 +1,65 @@
+# Both guardians (swing/MTF + intraday/manual MIS) as ONE systemd service.
+#
+# This is what scripts/start_guardians.sh does with tmux, but owned by the
+# machine instead of by a login session. The practical difference:
+#
+#   tmux     survives SSH dropping and the laptop closing, but NOT a reboot,
+#            and nothing restarts it if the process dies.
+#   systemd  survives all of that, restarts on crash, and starts at boot.
+#
+# Install on the Contabo box:
+#   sudo cp deploy/all-guardians.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now all-guardians
+#   journalctl -fu all-guardians
+#
+# Do NOT run this alongside the tmux session or the separate
+# swing-guardian/intraday-bot services -- two guardians on the same
+# positions means duplicate exit orders. Kill the tmux session first:
+#   sudo -iu trader tmux kill-session -t guardians
+#
+# DAILY: Kite access tokens expire overnight. This service cannot prompt for
+# a login (no terminal), so it will fail fast and back off until a fresh
+# session exists. Refresh it each morning before the open with:
+#   sudo -iu trader bash -lc 'cd ~/intraday-bot && .venv/bin/python3 -m src.auth --paste'
+#   sudo systemctl restart all-guardians
+
+[Unit]
+Description=Swing (MTF) + intraday (MIS) position guardians
+After=network-online.target
+Wants=network-online.target
+
+# A guardian that cannot start is a guardian whose exits are not being
+# placed. Five failures in five minutes and it stays down loudly rather
+# than thrashing -- almost always a missing Kite session for the day.
+StartLimitBurst=5
+StartLimitIntervalSec=300
+
+[Service]
+Type=simple
+User=trader
+WorkingDirectory=/home/trader/intraday-bot
+ExecStart=/home/trader/intraday-bot/.venv/bin/python3 scripts/run_all_guardians.py
+
+Restart=always
+RestartSec=15
+
+Environment=PYTHONUNBUFFERED=1
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=all-guardians
+
+# Hardening -- same posture as the other units. This process holds Kite
+# credentials and can place real exit orders.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/trader/intraday-bot
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+
+[Install]
+WantedBy=multi-user.target
