@@ -22,18 +22,30 @@
 # a login (no terminal), so it will fail fast and back off until a fresh
 # session exists. Refresh it each morning before the open with:
 #   sudo -iu trader bash -lc 'cd ~/intraday-bot && .venv/bin/python3 -m src.auth --paste'
-#   sudo systemctl restart all-guardians
+#
+# No restart needed after that -- the service retries every 60s and picks
+# up the new session by itself. Confirm with:
+#   systemctl is-active all-guardians && journalctl -u all-guardians -n 5
 
 [Unit]
 Description=Swing (MTF) + intraday (MIS) position guardians
 After=network-online.target
 Wants=network-online.target
 
-# A guardian that cannot start is a guardian whose exits are not being
-# placed. Five failures in five minutes and it stays down loudly rather
-# than thrashing -- almost always a missing Kite session for the day.
-StartLimitBurst=5
-StartLimitIntervalSec=300
+# The other units in this repo stop after 5 failures in 5 minutes, on the
+# reasoning that a dead bot should be loud rather than thrash. That
+# reasoning depends on Telegram working, and it currently does not -- a
+# service that gives up at 09:05 would simply be silently absent for the
+# session.
+#
+# So: keep retrying for an hour. The overwhelming cause of a failed start
+# is the Kite token, which expires nightly and cannot be refreshed from
+# here (no terminal to log in on). Retrying every 60s means that the
+# moment you run `python3 -m src.auth` the service picks the session up on
+# its own, with no systemctl restart to remember. After an hour of
+# failures something is genuinely wrong and it stays down.
+StartLimitBurst=60
+StartLimitIntervalSec=3600
 
 [Service]
 Type=simple
@@ -42,7 +54,7 @@ WorkingDirectory=/home/trader/intraday-bot
 ExecStart=/home/trader/intraday-bot/.venv/bin/python3 scripts/run_all_guardians.py
 
 Restart=always
-RestartSec=15
+RestartSec=60
 
 Environment=PYTHONUNBUFFERED=1
 
