@@ -18,6 +18,7 @@ listed, just with gross P&L and a note, rather than silently dropped.
 
 import json
 from datetime import date, datetime, time
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from . import orders
@@ -27,6 +28,25 @@ from .swing_strategy import MTF_PLEDGE_CHARGE, mtf_interest, mtf_order_cost
 IST = ZoneInfo("Asia/Kolkata")
 
 EOD_TABLE_TIME = time(16, 1)  # 4:01 PM, after the 15:30 close
+
+# A FILE, not just stdout -- found the hard way on 2026-10-29: this thread shares a
+# terminal with swing_live's own warnings, which can repeat every poll (a books-mismatch
+# warning, say) and fill tmux's limited scrollback within hours, silently erasing whatever
+# this thread printed hours earlier. A persistent line here survives that regardless of
+# how noisy the terminal gets, so a missed/failed table is actually diagnosable the next day.
+DIGEST_LOG_FILE = Path(__file__).resolve().parent.parent / "logs" / "digest.log"
+
+
+def _log(line: str) -> None:
+    stamp = datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S")
+    text = f"{stamp} {line}"
+    print(text)
+    try:
+        DIGEST_LOG_FILE.parent.mkdir(exist_ok=True)
+        with open(DIGEST_LOG_FILE, "a") as f:
+            f.write(text + "\n")
+    except Exception as exc:  # noqa: BLE001 - a logging failure must never break the digest itself
+        print(f"WARNING: could not write {DIGEST_LOG_FILE}: {exc}")
 
 
 def _money(x) -> str:
@@ -137,18 +157,32 @@ def run_digest_loop(get_kite, notifier, should_stop=None, poll_interval: int = 3
     """
     import time as time_module
 
+    _log(f"digest thread started -- will fire at {EOD_TABLE_TIME} IST")
     sent_today: set[date] = set()
+    last_heartbeat_hour = None
     while True:
         if should_stop is not None and should_stop():
+            _log("digest thread stopping (should_stop)")
             return
         now = datetime.now(IST)
+        # One line per hour just to prove the thread is still alive and looping --
+        # cheap insurance against a silent hang that would otherwise look identical
+        # to "nothing happened yet" until EOD_TABLE_TIME came and went with no table.
+        if now.hour != last_heartbeat_hour:
+            last_heartbeat_hour = now.hour
+            _log(f"digest thread alive, next fire at {EOD_TABLE_TIME} IST (sent today: {bool(sent_today)})")
         if now.time() >= EOD_TABLE_TIME and now.date() not in sent_today:
             sent_today.add(now.date())
             try:
                 kite = get_kite()
                 message = build_eod_table(kite)
                 if message and notifier:
-                    notifier(message, parse_mode="HTML")
+                    sent_ok = notifier(message, parse_mode="HTML")
+                    _log(f"end-of-day table sent (notifier returned {sent_ok!r})")
+                elif message:
+                    _log("end-of-day table built but no notifier configured -- not sent")
+                else:
+                    _log("end-of-day table skipped -- no open MTF holdings")
             except Exception as exc:  # noqa: BLE001 - one bad day must never stop future ones
-                print(f"WARNING: end-of-day table failed: {exc}")
+                _log(f"WARNING: end-of-day table failed: {exc!r}")
         time_module.sleep(poll_interval)
