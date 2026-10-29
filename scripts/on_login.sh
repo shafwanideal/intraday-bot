@@ -14,6 +14,20 @@ cd "$(dirname "$0")/.." || exit 1
 mkdir -p logs
 stamp() { date '+%Y-%m-%d %H:%M:%S'; }
 
+# deploy/all-guardians.service supervises the SAME scripts/run_all_guardians.py
+# under systemd (survives a reboot, which a tmux session does not). If that unit
+# is running, starting a tmux copy as well would put two guardians on the same
+# positions -- and because they place real exit orders, the second one can sell
+# stock the first has already sold and leave the account SHORT. Defer to systemd.
+#
+# The check lives here rather than in the unit: the service sets PrivateTmp=true,
+# so from inside it tmux's socket under /tmp is invisible and a has-session test
+# would always come back clean. This side can see both, so this side decides.
+if systemctl is-active --quiet all-guardians 2>/dev/null; then
+    echo "$(stamp) all-guardians.service is active -- NOT starting a tmux copy (it would duplicate exits)"
+    exit 0
+fi
+
 if ! command -v tmux >/dev/null 2>&1; then
     echo "$(stamp) tmux not found -- guardians NOT started"; exit 1
 fi
