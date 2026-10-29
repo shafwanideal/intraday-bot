@@ -82,6 +82,10 @@ POLL_INTERVAL_SECONDS = 5  # faster than swing (intraday moves faster), but see 
 # --poll-interval usage note in scripts/run_intraday_live.py about combined rate
 # limits if run_live.py's own 1s loop is ALSO polling kite.quote() at the same time.
 
+# Alert-only threshold, same reasoning as swing_live.BIG_MOVE_PCT -- fires once per
+# position regardless of direction or trailing-arm state.
+BIG_MOVE_PCT = 0.03
+
 
 def _now() -> datetime:
     return datetime.now(IST)
@@ -96,6 +100,7 @@ class IntradayLogger:
         "intraday_exit",
         "intraday_square_off",
         "intraday_position_closed_externally",
+        "intraday_big_move",
         "start",
         "end",
     }
@@ -277,6 +282,7 @@ def check_once(kite, state: dict[str, dict], logger: IntradayLogger) -> None:
                 "armed_activation_pct": None,
                 "trailing_activated_at": None,
                 "missing_polls": 0,
+                "notified_big_move": False,
             }
             logger.event(
                 "intraday_position_detected", symbol=symbol, direction=direction, qty=abs(pos["quantity"]), avg_price=pos["average_price"]
@@ -295,6 +301,14 @@ def check_once(kite, state: dict[str, dict], logger: IntradayLogger) -> None:
         direction = st["direction"]
         avg_price = pos["average_price"]
         qty = abs(pos["quantity"])
+
+        if not st.get("notified_big_move") and abs(ltp - avg_price) / avg_price >= BIG_MOVE_PCT:
+            st["notified_big_move"] = True
+            move_pct_signed = (ltp - avg_price) / avg_price if direction == "long" else (avg_price - ltp) / avg_price
+            logger.event(
+                "intraday_big_move", symbol=symbol, direction=direction, avg_price=avg_price, ltp=ltp,
+                move_pct=round(move_pct_signed * 100, 2),
+            )
 
         # Hard square-off overrides everything else -- MIS cannot carry overnight.
         if now.time() >= SQUARE_OFF_TIME:

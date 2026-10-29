@@ -34,6 +34,11 @@ def format_event(kind: str, fields: dict, label: str = "") -> str:
                 gross = (float(price) - float(avg)) * float(qty) * (1 if direction == "long" else -1)
                 line += f" (avg {_money(avg)}), gross P&L ≈ {_money(gross)} before charges"
             return line
+        if kind.endswith("_big_move"):
+            pct = float(fields["move_pct"])
+            verb = "in your favor" if pct >= 0 else "against you"
+            return (f"⚡ {tag}Big move — {sym}\n"
+                    f"{abs(pct):.2f}% {verb} vs avg {_money(fields['avg_price'])} (now {_money(fields.get('ltp'))}).")
         if kind.endswith("_position_detected"):
             return f"👀 {tag}Now watching {sym}: {fields.get('qty')} @ avg {_money(fields.get('avg_price'))}"
         if kind.endswith("_position_closed_externally"):

@@ -95,6 +95,12 @@ POLL_INTERVAL_SECONDS = 30
 # nothing acts on it in the meantime.
 MISSING_POLLS_BEFORE_DROP = 3
 
+# Alert-only threshold (requested separately from the arm/trail thresholds above) --
+# a move this large off avg_price, in EITHER direction, is worth a phone notification
+# on its own merit, independent of whether trailing has armed yet. Fires once per
+# position (see state["notified_big_move"]), not on every poll past the threshold.
+BIG_MOVE_PCT = 0.03
+
 
 def _now() -> datetime:
     return datetime.now(IST)
@@ -109,6 +115,7 @@ class SwingLogger:
         "swing_exit",
         "swing_position_closed_externally",
         "swing_funded_amount_unavailable",
+        "swing_big_move",
         "start",
         "end",
     }
@@ -373,6 +380,7 @@ def check_once(kite, state: dict[str, dict], logger: SwingLogger) -> None:
                 "funded_amount": funded_amount,
                 "last_qty": pos["quantity"],
                 "missing_polls": 0,
+                "notified_big_move": False,
             }
             logger.event(
                 "swing_position_detected",
@@ -407,6 +415,13 @@ def check_once(kite, state: dict[str, dict], logger: SwingLogger) -> None:
             continue
         avg_price = pos["average_price"]
         st = state[symbol]
+
+        if not st.get("notified_big_move") and abs(ltp - avg_price) / avg_price >= BIG_MOVE_PCT:
+            st["notified_big_move"] = True
+            move_pct_signed = (ltp - avg_price) / avg_price
+            logger.event(
+                "swing_big_move", symbol=symbol, avg_price=avg_price, ltp=ltp, move_pct=round(move_pct_signed * 100, 2)
+            )
 
         if st["trailing"]:
             st["peak_price"] = max(st["peak_price"], ltp)
