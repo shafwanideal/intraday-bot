@@ -207,7 +207,7 @@ td .tag { font-size: 11px; color: var(--muted); margin-left: 6px; }
     setStatus("", "Updating…");
     try {
       var res = await fetch("api/portfolio", { headers: { Authorization: "Bearer " + token }, cache: "no-store" });
-      if (res.status === 401) { clearToken(); return showGate("That token was not accepted."); }
+      if (res.status === 401 || res.status === 404) { clearToken(); return showGate("That token was not accepted."); }
       if (!res.ok) throw new Error("Server answered " + res.status);
       state.data = await res.json();
       showApp(); render();

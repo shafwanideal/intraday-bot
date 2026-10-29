@@ -7,6 +7,9 @@ StartLimitIntervalSec=300
 
 [Service]
 Type=simple
+# Same user as the bot: .env is owned by it, and root-owned files in the repo break `git pull`.
+User=trader
+Group=trader
 WorkingDirectory=__DIR__
 ExecStart=__DIR__/.venv/bin/python -u -m scripts.run_dashboard_api
 Restart=always

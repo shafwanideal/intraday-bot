@@ -203,7 +203,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(404, {"error": "not found"})
         supplied = self.headers.get("Authorization", "").removeprefix("Bearer ").strip()
         if not hmac.compare_digest(supplied, self.token):
-            return self._send(401, {"error": "bad token"})
+            return self._send(404, {"error": "not found"})  # 404, not 401: don't confirm the endpoint to probes
         self._send(200, snapshot_cached())
 
     def log_message(self, fmt, *args):  # keep the journal quiet; no tokens ever reach it
