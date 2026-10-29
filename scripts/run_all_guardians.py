@@ -20,6 +20,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from src import auth, telegram_notify  # noqa: E402
+from src.digest import run_digest_loop  # noqa: E402
 from src.intraday_live import POLL_INTERVAL_SECONDS as INTRADAY_POLL_INTERVAL_SECONDS  # noqa: E402
 from src.intraday_live import run_intraday_guardian  # noqa: E402
 from src.swing_live import POLL_INTERVAL_SECONDS as SWING_POLL_INTERVAL_SECONDS  # noqa: E402
@@ -56,18 +57,27 @@ def main() -> None:
         daemon=True,
     )
 
+    digest_thread = threading.Thread(
+        target=run_digest_loop,
+        kwargs={"get_kite": auth.get_kite, "notifier": notifier},
+        name="digest",
+        daemon=True,
+    )
+
     swing_thread.start()
     intraday_thread.start()
+    digest_thread.start()
 
-    print("Both guardians are running. Ctrl+C stops both.", flush=True)
+    print("Both guardians (and the digest) are running. Ctrl+C stops all.", flush=True)
     try:
         # Plain .join() would block the main thread uninterruptibly on POSIX
         # once both targets are daemon threads sleeping in time.sleep(); a
         # timeout loop keeps the main thread waking up regularly so Ctrl+C
         # (SIGINT) actually gets delivered and handled promptly.
-        while swing_thread.is_alive() or intraday_thread.is_alive():
+        while swing_thread.is_alive() or intraday_thread.is_alive() or digest_thread.is_alive():
             swing_thread.join(timeout=1)
             intraday_thread.join(timeout=1)
+            digest_thread.join(timeout=1)
     except KeyboardInterrupt:
         print("\nStopping -- each guardian finishes its current poll, then this process exits.")
 
