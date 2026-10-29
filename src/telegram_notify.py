@@ -33,15 +33,25 @@ def enabled() -> bool:
     return bool(config.TELEGRAM_BOT_TOKEN and config.TELEGRAM_CHAT_ID)
 
 
-def send_message(text: str) -> bool:
+def send_message(text: str, parse_mode: str | None = None) -> bool:
     """Best-effort send -- returns True on success, False (and prints a
-    warning) on any failure. Never raises."""
+    warning) on any failure. Never raises.
+
+    parse_mode: None (default) sends plain text, exactly as before -- every
+    existing caller is unaffected. "HTML" lets a caller (see src/digest.py's
+    end-of-day table) wrap part of the message in <pre> for a monospace,
+    column-aligned table on the phone; Telegram requires &, < and > to be
+    escaped in HTML mode, so callers that want this build the message with
+    that in mind."""
     if not enabled():
         return False
     try:
+        data = {"chat_id": config.TELEGRAM_CHAT_ID, "text": text}
+        if parse_mode:
+            data["parse_mode"] = parse_mode
         resp = requests.post(
             TELEGRAM_API_URL.format(token=config.TELEGRAM_BOT_TOKEN),
-            data={"chat_id": config.TELEGRAM_CHAT_ID, "text": text},
+            data=data,
             timeout=REQUEST_TIMEOUT_SECONDS,
         )
         if resp.status_code != 200:

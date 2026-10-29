@@ -1,15 +1,19 @@
-"""Periodic phone summary: holding net P&L (swing/MTF) and today's intraday
-move (manual MIS positions), sent at fixed clock times during market hours.
+"""End-of-day phone table: buy price, current price, and real NET P&L for
+every open swing (MTF) holding, sent once at EOD_TABLE_TIME.
 
-Explicit request: "every 3 hours during market hour starting from 10 am ...
-about the holding net p&l, todays intraday move". Fires at DIGEST_TIMES only
--- it does not replace the instant alerts (trailing armed, sold, +-3% move),
-which fire from swing_live.py/intraday_live.py the moment they happen.
+Replaces an earlier twice-daily (10:00/13:00) gross-P&L digest that turned
+out to be clutter -- the explicit ask now is exactly one table, at 4:01 PM,
+with real net figures, and nothing in between. The three INSTANT alerts
+(trailing armed, sold, +-3% move) are unaffected -- they still fire from
+swing_live.py/intraday_live.py the moment they happen; this module only
+covers the one daily table.
 
-Independent of the guardians' own in-memory tracking state on purpose: it
-reads positions straight from Kite each time, so a digest is never stale or
-missing something the guardian hasn't polled yet, and a guardian crash can't
-take the digest down with it.
+Net P&L needs funded_amount and entry_date per holding, which only
+swing_live's own persisted state (SWING_STATE_FILE) has -- Kite's raw
+position response doesn't carry either. So, unlike an earlier draft of this
+module, the table is NOT independent of that state: a holding missing from
+the state file (e.g. the guardian hasn't polled it yet this run) is still
+listed, just with gross P&L and a note, rather than silently dropped.
 """
 
 import json
@@ -18,149 +22,133 @@ from zoneinfo import ZoneInfo
 
 from . import orders
 from .swing_live import SWING_STATE_FILE
+from .swing_strategy import MTF_PLEDGE_CHARGE, mtf_interest, mtf_order_cost
 
 IST = ZoneInfo("Asia/Kolkata")
 
-# Every 3 hours starting 10:00, for as long as that still falls inside market
-# hours (9:15-15:30) -- 10:00 and 13:00; 16:00 would be past close, so it
-# never fires. Change this list directly if the cadence should differ.
-DIGEST_TIMES = [time(10, 0), time(13, 0)]
+EOD_TABLE_TIME = time(16, 1)  # 4:01 PM, after the 15:30 close
 
 
 def _money(x) -> str:
-    return f"₹{x:,.2f}"
+    return f"{x:,.2f}"
 
 
-def _trailing_armed_symbols() -> set[str]:
-    """Best-effort read of swing_live's own persisted state, for the "is
-    trailing already armed" flag only -- everything else in this digest
-    comes straight from Kite (see module docstring on why). A read failure
-    (file mid-write, missing, or malformed) just means the flag is omitted
-    for this one digest, never a reason to fail the whole message."""
+def _escape_html(s: str) -> str:
+    return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def _load_swing_state() -> dict:
     try:
         with open(SWING_STATE_FILE) as f:
-            state = json.load(f)
-        return {sym for sym, st in state.items() if st.get("trailing")}
-    except Exception:  # noqa: BLE001
-        return set()
+            return json.load(f)
+    except Exception:  # noqa: BLE001 - missing/mid-write/malformed -> treat as "no extra info available"
+        return {}
 
 
-def _swing_section(kite, today: date) -> tuple[str, float, bool]:
-    """Returns (text, total_gross_pnl, any_position). GROSS only, same
-    convention as swing_live's own swing_exit log -- the real MTF funding
-    interest depends on entry_date and funded_amount, which live in
-    swing_live's own tracking state, not in Kite's raw position response,
-    and this is deliberately independent of that state (see module
-    docstring). Ask for a specific symbol's net figure on demand instead
-    (same approach already used for a one-off real exit)."""
+def _net_pnl(position_value: float, funded_amount: float, days_held: int, gross: float) -> float:
+    """Same cost model as the real swing_exit figure (see swing_live.py),
+    applied to the CURRENT unrealized gross as if sold right now."""
+    buy_cost = mtf_order_cost(position_value, "buy")
+    sell_cost = mtf_order_cost(position_value + gross, "sell")
+    interest = mtf_interest(funded_amount, days_held)
+    pledge_roundtrip = 2 * MTF_PLEDGE_CHARGE
+    return gross - (buy_cost + sell_cost + interest + pledge_roundtrip)
+
+
+def build_eod_table(kite) -> str | None:
+    """Returns the HTML-ready message, or None if there is nothing open to
+    show (no message is sent that day in that case)."""
+    today = datetime.now(IST).date()
     try:
         net = kite.positions().get("net", [])
-    except Exception as exc:  # noqa: BLE001 - a fetch failure must not break the whole digest
-        return f"  (couldn't fetch swing holdings: {exc})", 0.0, False
+    except Exception as exc:  # noqa: BLE001
+        return f"⚠️ End-of-day table failed -- couldn't fetch holdings: {exc}"
     mtf = [p for p in net if p.get("product") == orders.PRODUCT_MTF and p.get("quantity", 0) > 0]
     if not mtf:
-        return "  No open swing (MTF) holdings.", 0.0, False
+        return None
 
-    armed = _trailing_armed_symbols()
+    state = _load_swing_state()
     symbols = [p["tradingsymbol"] for p in mtf]
     try:
         quotes = kite.quote([f"NSE:{s}" for s in symbols])
     except Exception:
         quotes = {}
 
-    lines = []
-    total_gross = 0.0
+    rows = []  # (symbol, buy, current, net_pnl_str, armed_flag)
+    total_net = 0.0
+    total_known = True
     for p in mtf:
         sym = p["tradingsymbol"]
+        qty, avg = p["quantity"], p["average_price"]
         q = quotes.get(f"NSE:{sym}")
         ltp = q.get("last_price") if q else None
-        qty, avg = p["quantity"], p["average_price"]
-        arm_tag = " [trailing armed]" if sym in armed else ""
+        st = state.get(sym)
+        armed = " *" if st and st.get("trailing") else ""
+
         if ltp is None:
-            lines.append(f"  {sym}: {qty} @ {_money(avg)} -- live price unavailable{arm_tag}")
+            rows.append((sym, _money(avg), "n/a", "n/a" + armed))
+            total_known = False
             continue
+
         gross = (ltp - avg) * qty
-        total_gross += gross
-        pct = (ltp - avg) / avg * 100
-        lines.append(f"  {sym}: {qty} @ {_money(avg)} -> {_money(ltp)} ({pct:+.2f}%), P&L {_money(gross)} (gross){arm_tag}")
-    return "\n".join(lines), total_gross, True
+        funded_amount = st.get("funded_amount") if st else None
+        entry_date_str = st.get("entry_date") if st else None
+        if funded_amount is not None and entry_date_str:
+            days_held = max(0, (today - date.fromisoformat(entry_date_str)).days)
+            net_pnl = _net_pnl(qty * avg, funded_amount, days_held, gross)
+            total_net += net_pnl
+            rows.append((sym, _money(avg), _money(ltp), _money(net_pnl) + armed))
+        else:
+            # No funded_amount/entry_date on record (e.g. detected this instant, before the
+            # guardian's own first poll saved it) -- show gross rather than silently guess
+            # a net figure, and flag the total as incomplete.
+            total_known = False
+            rows.append((sym, _money(avg), _money(ltp), _money(gross) + " (gross)" + armed))
 
+    name_w = max(6, max(len(r[0]) for r in rows))
+    header = f"{'Symbol':<{name_w}}  {'Buy':>10}  {'Current':>10}  {'Net P&L':>14}"
+    sep = "-" * len(header)
+    lines = [header, sep]
+    for sym, buy, cur, pnl in rows:
+        lines.append(f"{sym:<{name_w}}  {buy:>10}  {cur:>10}  {pnl:>14}")
+    table = _escape_html("\n".join(lines))
 
-def _intraday_section(kite) -> tuple[str, float, bool]:
-    try:
-        day = kite.positions().get("day", [])
-    except Exception as exc:  # noqa: BLE001
-        return f"  (couldn't fetch intraday positions: {exc})", 0.0, False
-    mis = [p for p in day if p.get("product") == "MIS" and p.get("quantity", 0) != 0]
-    if not mis:
-        return "  No open intraday (MIS) positions right now.", 0.0, False
+    total_line = f"TOTAL net P&L: ₹{_money(total_net)}" if total_known else \
+        f"TOTAL net P&L (where known): ₹{_money(total_net)} -- one or more rows above are gross/n-a, see note"
+    armed_note = "  * = trailing already armed" if any("*" in r[3] for r in rows) else ""
 
-    symbols = [p["tradingsymbol"] for p in mis]
-    try:
-        quotes = kite.quote([f"NSE:{s}" for s in symbols])
-    except Exception:
-        quotes = {}
-
-    lines = []
-    total_gross = 0.0
-    for p in mis:
-        sym = p["tradingsymbol"]
-        q = quotes.get(f"NSE:{sym}")
-        ltp = q.get("last_price") if q else None
-        qty, avg = p["quantity"], p["average_price"]
-        direction = "long" if qty > 0 else "short"
-        if ltp is None:
-            lines.append(f"  {sym} ({direction}): {abs(qty)} @ {_money(avg)} -- live price unavailable")
-            continue
-        gross = (ltp - avg) * qty  # already direction-correct: qty is negative for a short
-        total_gross += gross
-        pct = (ltp - avg) / avg * 100 * (1 if direction == "long" else -1)
-        lines.append(f"  {sym} ({direction}): {abs(qty)} @ {_money(avg)} -> {_money(ltp)} ({pct:+.2f}%), P&L {_money(gross)}")
-    return "\n".join(lines), total_gross, True
-
-
-def build_digest_message(kite) -> str:
-    now = datetime.now(IST)
-    swing_text, swing_total, has_swing = _swing_section(kite, now.date())
-    intraday_text, intraday_total, has_intraday = _intraday_section(kite)
-    grand_total = swing_total + intraday_total
-
-    lines = [f"📊 Portfolio check-in — {now.strftime('%H:%M')} IST", "", "Swing (MTF) holdings:", swing_text,
-              "", "Today's intraday (MIS):", intraday_text]
-    if has_swing or has_intraday:
-        lines += ["", f"Combined open P&L (gross): {_money(grand_total)}"]
-    return "\n".join(lines)
+    return (f"📋 End-of-day holdings — {today.isoformat()}\n\n"
+            f"<pre>{table}</pre>\n"
+            f"{total_line}{armed_note}")
 
 
 def run_digest_loop(get_kite, notifier, should_stop=None, poll_interval: int = 30) -> None:
-    """Sends build_digest_message() once at each time in DIGEST_TIMES, once
-    per calendar day. Meant to run as its own daemon thread alongside the
-    guardians (see scripts/run_all_guardians.py) -- entirely independent of
-    their state, so it can't be broken by a guardian restart, and a digest
-    failure (logged, not raised) can't take a guardian down either.
+    """Sends build_eod_table() once, at EOD_TABLE_TIME, once per calendar
+    day. Meant to run as its own daemon thread alongside the guardians (see
+    scripts/run_all_guardians.py) -- a failure here is logged, never raised,
+    so it can't take a guardian down, and a guardian crash/restart can't
+    break this loop either.
 
-    `sent_today` is in-memory only: a process restart after a digest time has
-    already passed today will NOT re-send it (so a crash-restart loop can't
-    spam duplicates), but will also not catch up a MISSED digest from before
-    the restart. Given the guardians are meant to stay up all day, this is an
-    acceptable trade-off for how rarely a restart should actually happen.
+    `sent_today` is in-memory only: a process restart after EOD_TABLE_TIME
+    has already passed today will NOT re-send it today (so a crash-restart
+    loop can't spam duplicates), but also won't catch up a table missed
+    before the restart -- an acceptable trade-off given how rarely that
+    should actually happen with the supervisor keeping this process up.
     """
     import time as time_module
 
-    sent_today: set[tuple[date, time]] = set()
+    sent_today: set[date] = set()
     while True:
         if should_stop is not None and should_stop():
             return
         now = datetime.now(IST)
-        for t in DIGEST_TIMES:
-            key = (now.date(), t)
-            if now.time() >= t and key not in sent_today:
-                sent_today.add(key)
-                try:
-                    kite = get_kite()
-                    message = build_digest_message(kite)
-                    if notifier:
-                        notifier(message)
-                except Exception as exc:  # noqa: BLE001 - one bad digest must never stop future ones
-                    print(f"WARNING: digest at {t} failed: {exc}")
+        if now.time() >= EOD_TABLE_TIME and now.date() not in sent_today:
+            sent_today.add(now.date())
+            try:
+                kite = get_kite()
+                message = build_eod_table(kite)
+                if message and notifier:
+                    notifier(message, parse_mode="HTML")
+            except Exception as exc:  # noqa: BLE001 - one bad day must never stop future ones
+                print(f"WARNING: end-of-day table failed: {exc}")
         time_module.sleep(poll_interval)
