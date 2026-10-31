@@ -61,7 +61,7 @@ from datetime import date, datetime, time
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from . import alerts, auth, config, orders
+from . import alerts, auth, config, heartbeat, orders
 from .swing_strategy import PROFIT_TARGET_PCT, TRAILING_PCT, compute_mtf_breakeven_pct
 
 IST = ZoneInfo("Asia/Kolkata")
@@ -514,6 +514,8 @@ def run_swing_guardian(poll_interval: int = POLL_INTERVAL_SECONDS, notifier=None
             if should_stop is not None and should_stop():
                 logger.event("stop_requested")
                 break
+
+            heartbeat.touch("swing")
 
             now = _now().time()
             if now < MARKET_OPEN or now >= MARKET_CLOSE:

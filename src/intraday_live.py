@@ -51,7 +51,7 @@ from datetime import datetime, time
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from . import alerts, auth, config, orders
+from . import alerts, auth, config, heartbeat, orders
 from .live import TODAYS_STOCKS_FILE
 from .strategy import (
     GRID_PCT,
@@ -389,6 +389,8 @@ def run_intraday_guardian(poll_interval: int = POLL_INTERVAL_SECONDS, notifier=N
             if should_stop is not None and should_stop():
                 logger.event("stop_requested")
                 break
+
+            heartbeat.touch("intraday")
 
             now = _now().time()
             if now < MARKET_OPEN or now >= MARKET_CLOSE:
