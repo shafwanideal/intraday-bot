@@ -65,6 +65,29 @@ The one-off/tunnel alternative still works while the Redirect URL is
 `http://127.0.0.1:8000/`: `ssh -L 8000:127.0.0.1:8000 root@<vps>` then
 `kite_login.py --redirect http://127.0.0.1:8000/ --no-browser` on the VPS.
 
+## Live broker dashboard (Zerodha + Groww)
+
+A read-only web page that shows your Kite and Groww holdings, open positions, funds and P&L.
+Every time you open it, it fetches fresh data straight from the two broker APIs (then keeps
+refreshing every 20 s while the tab is visible). It reuses the bot's existing Kite session and
+Groww credentials, so nothing new is needed except one token.
+
+```bash
+# 1. in .env on the VPS
+DASHBOARD_TOKEN=$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')   # paste the value
+
+# 2. check it works against your real accounts (prints one snapshot, no server)
+.venv/bin/python -m scripts.run_dashboard_api --once
+
+# 3. run it (systemd: deploy/dashboard-api.service) and add deploy/nginx-dashboard-api.conf
+.venv/bin/python -m scripts.run_dashboard_api
+```
+
+Then open `https://<your-host>/dash/` and paste the token once (it stays in that browser).
+If a broker can't be reached (for example the Kite login bookmark hasn't been clicked today)
+its card says why and the other broker still shows. The server only calls holdings, positions,
+margins and quote methods; it never places or changes an order.
+
 ## Pre-flight check
 
 ```bash

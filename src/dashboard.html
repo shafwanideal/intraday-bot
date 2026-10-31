@@ -1,0 +1,378 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="referrer" content="no-referrer">
+<title>Zerodha + Groww Live</title>
+<style>
+/* Layout: one summary strip, one card per broker, one sortable table of everything held. */
+:root {
+  --bg: #f4f5f7;
+  --panel: #ffffff;
+  --fg: #14181f;
+  --muted: #5d6675;
+  --line: #dfe3ea;
+  --zerodha: #3b5bdb;
+  --groww: #c27803;
+  --gain: #0b7a43;
+  --loss: #b42318;
+  --gain-bg: #e3f4ea;
+  --loss-bg: #fbe7e5;
+  --font-ui: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-num: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0f1218; --panel: #171b23; --fg: #e8ebf0; --muted: #9aa3b2; --line: #272d38;
+    --zerodha: #7c93f5; --groww: #e3a33b; --gain: #4cc38a; --loss: #f2766b;
+    --gain-bg: #12301f; --loss-bg: #3a1b18; color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #0f1218; --panel: #171b23; --fg: #e8ebf0; --muted: #9aa3b2; --line: #272d38;
+  --zerodha: #7c93f5; --groww: #e3a33b; --gain: #4cc38a; --loss: #f2766b;
+  --gain-bg: #12301f; --loss-bg: #3a1b18; color-scheme: dark;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; }
+body {
+  background: var(--bg); color: var(--fg); font: 14px/1.45 var(--font-ui);
+  padding-block: 20px 48px;
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+}
+.wrap { max-width: 1120px; margin: 0 auto; display: grid; gap: 16px; }
+h1 { font-size: 20px; font-weight: 600; margin: 0; letter-spacing: -0.01em; }
+h2 { font-size: 13px; font-weight: 600; margin: 0; color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em; }
+.num { font-family: var(--font-num); font-variant-numeric: tabular-nums; }
+.gain { color: var(--gain); } .loss { color: var(--loss); }
+button, input { font: inherit; color: inherit; }
+button { cursor: pointer; }
+:focus-visible { outline: 2px solid var(--zerodha); outline-offset: 2px; }
+
+header { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 16px; }
+.status { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 13px; }
+.dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
+.dot.live { background: var(--gain); } .dot.bad { background: var(--loss); }
+.btn { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 6px 12px; }
+.btn:hover { border-color: var(--muted); }
+
+.panel { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 16px; min-width: 0; }
+.stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 200px), 1fr)); gap: 12px; }
+.stat .label { color: var(--muted); font-size: 12px; }
+.stat .value { font-size: 24px; font-weight: 500; margin-top: 2px; }
+.stat .sub { font-size: 13px; margin-top: 2px; min-height: 1.4em; }
+
+.brokers { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 320px), 1fr)); gap: 12px; }
+.broker header { margin-bottom: 10px; }
+.swatch { width: 10px; height: 10px; border-radius: 2px; display: inline-block; margin-right: 8px; }
+.pill { font-size: 12px; padding: 2px 8px; border-radius: 999px; background: var(--gain-bg); color: var(--gain); }
+.pill.bad { background: var(--loss-bg); color: var(--loss); }
+.broker dl { display: grid; grid-template-columns: 1fr auto; gap: 4px 12px; margin: 0; }
+.broker dt { color: var(--muted); } .broker dd { margin: 0; text-align: right; }
+.err { margin: 10px 0 0; font-size: 12px; color: var(--loss); overflow-wrap: anywhere; }
+
+.split { display: flex; height: 10px; border-radius: 5px; overflow: hidden; background: var(--line); margin-top: 12px; }
+.split span { display: block; height: 100%; }
+.legend { display: flex; flex-wrap: wrap; gap: 4px 16px; margin-top: 8px; font-size: 12px; color: var(--muted); }
+
+.controls { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; margin-bottom: 12px; }
+.seg { display: inline-flex; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
+.seg button { background: transparent; border: 0; padding: 6px 12px; }
+.seg button + button { border-left: 1px solid var(--line); }
+.seg button[aria-pressed="true"] { background: var(--fg); color: var(--bg); }
+.controls input[type="search"] { background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 6px 10px; min-width: 0; flex: 1 1 140px; max-width: 260px; }
+
+.scroll { overflow-x: auto; }
+table { width: 100%; border-collapse: collapse; min-width: 760px; }
+th, td { padding: 8px 10px; text-align: right; border-bottom: 1px solid var(--line); white-space: nowrap; }
+th:first-child, td:first-child, th:nth-child(2), td:nth-child(2) { text-align: left; }
+th { font-weight: 500; color: var(--muted); font-size: 12px; background: var(--panel); position: sticky; top: 0; }
+th button { background: none; border: 0; padding: 0; color: inherit; font-size: inherit; }
+th[aria-sort] button::after { content: " \2195"; opacity: .4; }
+th[aria-sort="ascending"] button::after { content: " \2191"; opacity: 1; }
+th[aria-sort="descending"] button::after { content: " \2193"; opacity: 1; }
+tbody tr:hover { background: var(--bg); }
+td .tag { font-size: 11px; color: var(--muted); margin-left: 6px; }
+.bar { position: relative; display: inline-block; min-width: 92px; }
+.bar::before { content: ""; position: absolute; inset: 2px 0 2px auto; width: var(--w, 0%); background: var(--c, transparent); opacity: .16; border-radius: 3px; }
+.bar span { position: relative; padding: 0 6px; }
+.empty { color: var(--muted); text-align: center; padding: 28px 0; }
+
+#gate { max-width: 420px; margin: 12vh auto 0; }
+#gate p { color: var(--muted); }
+#gate form { display: flex; gap: 8px; margin-top: 12px; }
+#gate input { flex: 1; min-width: 0; background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 8px 10px; }
+#gate .msg { color: var(--loss); min-height: 1.4em; margin: 8px 0 0; }
+</style>
+</head>
+<body>
+<div class="wrap" id="app" hidden>
+  <header>
+    <h1>Zerodha + Groww</h1>
+    <div class="status">
+      <span class="dot" id="dot"></span><span id="status-text">Loading…</span>
+      <button class="btn" id="refresh" type="button">Refresh</button>
+    </div>
+  </header>
+
+  <section class="stats panel" aria-label="Portfolio totals">
+    <div class="stat"><div class="label">Current value</div><div class="value num" id="s-value">—</div><div class="sub num" id="s-value-sub"></div></div>
+    <div class="stat"><div class="label">Invested</div><div class="value num" id="s-invested">—</div><div class="sub"></div></div>
+    <div class="stat"><div class="label">Total P&amp;L</div><div class="value num" id="s-pnl">—</div><div class="sub num" id="s-pnl-pct"></div></div>
+    <div class="stat"><div class="label">Today (holdings)</div><div class="value num" id="s-day">—</div><div class="sub num" id="s-day-pct"></div></div>
+  </section>
+
+  <section class="brokers" id="brokers" aria-label="Brokers"></section>
+
+  <section class="panel" aria-label="Holdings and positions">
+    <div class="controls">
+      <div class="seg" id="seg-kind" role="group" aria-label="Show">
+        <button type="button" data-v="holding" aria-pressed="true">Holdings</button>
+        <button type="button" data-v="position" aria-pressed="false">Open positions</button>
+      </div>
+      <div class="seg" id="seg-broker" role="group" aria-label="Broker">
+        <button type="button" data-v="all" aria-pressed="true">All</button>
+        <button type="button" data-v="Zerodha" aria-pressed="false">Zerodha</button>
+        <button type="button" data-v="Groww" aria-pressed="false">Groww</button>
+      </div>
+      <input type="search" id="q" placeholder="Search symbol" aria-label="Search symbol">
+    </div>
+    <div class="scroll">
+      <table>
+        <thead><tr id="head"></tr></thead>
+        <tbody id="rows"></tbody>
+      </table>
+    </div>
+    <div class="empty" id="empty" hidden></div>
+  </section>
+</div>
+
+<div class="panel" id="gate" hidden>
+  <h1>Unlock dashboard</h1>
+  <p>Enter the dashboard token from your server's <span class="num">.env</span> (<span class="num">DASHBOARD_TOKEN</span>). It stays in this browser only.</p>
+  <form id="gate-form">
+    <input id="token" type="password" autocomplete="current-password" placeholder="Token" aria-label="Dashboard token" required>
+    <button class="btn" type="submit">Unlock</button>
+  </form>
+  <p class="msg" id="gate-msg" role="alert"></p>
+</div>
+
+<script>
+(function () {
+  var REFRESH_MS = 20000;
+  var COLS = [
+    { key: "broker", label: "Broker" }, { key: "symbol", label: "Symbol" },
+    { key: "qty", label: "Qty" }, { key: "avg", label: "Avg" }, { key: "ltp", label: "LTP" },
+    { key: "value", label: "Value" }, { key: "pnl", label: "P&L" }, { key: "pnl_pct", label: "P&L %" },
+    { key: "day_change", label: "Today" }
+  ];
+  var BROKER_VAR = { Zerodha: "var(--zerodha)", Groww: "var(--groww)" };
+  var state = { data: null, kind: "holding", broker: "all", q: "", sort: { key: "value", dir: -1 }, timer: null };
+
+  var $ = function (id) { return document.getElementById(id); };
+  var int0 = new Intl.NumberFormat("en-IN", { maximumFractionDigits: 0 });
+  var dec2 = new Intl.NumberFormat("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  var qtyFmt = new Intl.NumberFormat("en-IN", { maximumFractionDigits: 2 });
+  var rupee = function (n) { return "₹" + int0.format(Math.round(n)); };
+  var signed = function (n, f) { return (n > 0 ? "+" : n < 0 ? "−" : "") + f(Math.abs(n)); };
+  var tone = function (n) { return n > 0 ? "gain" : n < 0 ? "loss" : ""; };
+
+  function getToken() { try { return localStorage.getItem("dash_token") || ""; } catch (e) { return ""; } }
+  function setToken(t) { try { localStorage.setItem("dash_token", t); } catch (e) {} }
+  function clearToken() { try { localStorage.removeItem("dash_token"); } catch (e) {} }
+
+  function showGate(msg) {
+    $("app").hidden = true; $("gate").hidden = false;
+    $("gate-msg").textContent = msg || "";
+    stopTimer();
+  }
+  function showApp() { $("gate").hidden = true; $("app").hidden = false; }
+
+  function stopTimer() { if (state.timer) { clearInterval(state.timer); state.timer = null; } }
+  function startTimer() {
+    stopTimer();
+    state.timer = setInterval(function () { if (!document.hidden) load(); }, REFRESH_MS);
+  }
+
+  function setStatus(kind, text) {
+    $("dot").className = "dot" + (kind ? " " + kind : "");
+    $("status-text").textContent = text;
+  }
+
+  async function load() {
+    var token = getToken();
+    if (!token) return showGate("");
+    setStatus("", "Updating…");
+    try {
+      var res = await fetch("api/portfolio", { headers: { Authorization: "Bearer " + token }, cache: "no-store" });
+      if (res.status === 401 || res.status === 404) { clearToken(); return showGate("That token was not accepted."); }
+      if (!res.ok) throw new Error("Server answered " + res.status);
+      state.data = await res.json();
+      showApp(); render();
+      var failed = Object.values(state.data.brokers).filter(function (b) { return !b.ok; }).length;
+      var t = new Date(state.data.as_of).toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+      setStatus(failed ? "bad" : "live", (failed ? "Partial data · " : "Live · ") + "updated " + t + " IST");
+      if (!state.timer) startTimer();
+    } catch (e) {
+      showApp();
+      setStatus("bad", "Can't reach the server (" + e.message + "). Showing the last data.");
+      if (state.data) render();
+    }
+  }
+
+  function sum(rows, f) { return rows.reduce(function (a, r) { return a + (f(r) || 0); }, 0); }
+
+  function render() {
+    var d = state.data, rows = d.rows;
+    var holds = rows.filter(function (r) { return r.kind === "holding"; });
+    var value = sum(holds, function (r) { return r.value; });
+    var invested = sum(holds, function (r) { return r.invested; });
+    var pnl = sum(holds, function (r) { return r.pnl; });
+    var dayRows = holds.filter(function (r) { return r.day_change !== null; });
+    var day = sum(dayRows, function (r) { return r.day_change; });
+    var dayBase = value - day;
+
+    $("s-value").textContent = rupee(value);
+    $("s-invested").textContent = rupee(invested);
+    setSigned("s-pnl", pnl, rupee);
+    setSub("s-pnl-pct", invested ? (pnl / invested) * 100 : 0);
+    setSigned("s-day", day, rupee);
+    setSub("s-day-pct", dayBase ? (day / dayBase) * 100 : 0, dayRows.length < holds.length ? "partial: some holdings report no day change" : "");
+    var openPos = rows.filter(function (r) { return r.kind === "position" && r.qty !== 0; });
+    var posPnl = sum(openPos, function (r) { return r.pnl; });
+    $("s-value-sub").textContent = openPos.length ? openPos.length + " open position" + (openPos.length > 1 ? "s" : "") + " · " + signed(posPnl, rupee) : "No open positions";
+
+    renderBrokers(holds, value);
+    renderTable();
+  }
+
+  function setSigned(id, n, f) {
+    var el = $(id); el.textContent = signed(n, f); el.className = "value num " + tone(n);
+  }
+  function setSub(id, pct, note) {
+    var el = $(id); el.className = "sub num " + tone(pct);
+    el.textContent = signed(pct, function (x) { return dec2.format(x); }) + "%" + (note ? " · " + note : "");
+  }
+
+  function renderBrokers(holds, totalValue) {
+    var box = $("brokers"); box.replaceChildren();
+    var names = Object.keys(state.data.brokers);
+    names.forEach(function (name) {
+      var b = state.data.brokers[name];
+      var mine = holds.filter(function (r) { return r.broker === name; });
+      var v = sum(mine, function (r) { return r.value; });
+      var inv = sum(mine, function (r) { return r.invested; });
+      var p = sum(mine, function (r) { return r.pnl; });
+      var card = el("section", "panel broker");
+      var head = el("header");
+      var h = el("h2"); var sw = el("span", "swatch"); sw.style.background = BROKER_VAR[name] || "var(--muted)";
+      h.append(sw, document.createTextNode(name));
+      var pill = el("span", "pill" + (b.ok ? "" : " bad")); pill.textContent = b.ok ? "Connected" : "Not connected";
+      head.append(h, pill); card.append(head);
+      if (b.ok) {
+        var dl = el("dl");
+        [["Holdings value", rupee(v), ""], ["Invested", rupee(inv), ""],
+         ["P&L", signed(p, rupee) + " (" + signed(inv ? (p / inv) * 100 : 0, function (x) { return dec2.format(x); }) + "%)", tone(p)],
+         ["Funds available", b.funds && b.funds.available != null ? rupee(b.funds.available) : "—", ""],
+         ["Funds used", b.funds && b.funds.used != null ? rupee(b.funds.used) : "—", ""]
+        ].forEach(function (r) {
+          var dt = el("dt"); dt.textContent = r[0];
+          var dd = el("dd", "num " + r[2]); dd.textContent = r[1];
+          dl.append(dt, dd);
+        });
+        card.append(dl);
+        var share = totalValue ? (v / totalValue) * 100 : 0;
+        var split = el("div", "split"); var s = el("span"); s.style.width = share + "%"; s.style.background = BROKER_VAR[name] || "var(--muted)";
+        split.append(s); card.append(split);
+        var lg = el("div", "legend"); lg.textContent = dec2.format(share) + "% of total holdings value"; card.append(lg);
+      } else {
+        var e = el("p", "err"); e.textContent = b.error || "Unknown error"; card.append(e);
+      }
+      box.append(card);
+    });
+  }
+
+  function el(tag, cls) { var n = document.createElement(tag); if (cls) n.className = cls; return n; }
+
+  function renderHead() {
+    var tr = $("head"); tr.replaceChildren();
+    COLS.forEach(function (c) {
+      var th = el("th");
+      th.setAttribute("aria-sort", state.sort.key === c.key ? (state.sort.dir > 0 ? "ascending" : "descending") : "none");
+      var b = el("button"); b.type = "button"; b.textContent = c.label;
+      b.addEventListener("click", function () {
+        state.sort = { key: c.key, dir: state.sort.key === c.key ? -state.sort.dir : (c.key === "broker" || c.key === "symbol" ? 1 : -1) };
+        renderTable();
+      });
+      th.append(b); tr.append(th);
+    });
+  }
+
+  function renderTable() {
+    renderHead();
+    var d = state.data; var tb = $("rows"); tb.replaceChildren();
+    var q = state.q.trim().toLowerCase();
+    var list = d.rows.filter(function (r) {
+      return r.kind === state.kind && (state.broker === "all" || r.broker === state.broker) &&
+        (!q || r.symbol.toLowerCase().indexOf(q) >= 0);
+    });
+    var k = state.sort.key, dir = state.sort.dir;
+    list.sort(function (a, b) {
+      var x = a[k], y = b[k];
+      if (x === null) return 1; if (y === null) return -1;
+      return (typeof x === "string" ? x.localeCompare(y) : x - y) * dir;
+    });
+    var maxAbs = Math.max.apply(null, [1].concat(list.map(function (r) { return Math.abs(r.pnl); })));
+    list.forEach(function (r) {
+      var tr = el("tr");
+      var b = el("td"); var sw = el("span", "swatch"); sw.style.background = BROKER_VAR[r.broker] || "var(--muted)";
+      b.append(sw, document.createTextNode(r.broker));
+      var s = el("td"); s.textContent = r.symbol;
+      if (r.product) { var t = el("span", "tag"); t.textContent = r.product; s.append(t); }
+      tr.append(b, s,
+        cell(qtyFmt.format(r.qty)), cell(dec2.format(r.avg)), cell(r.ltp ? dec2.format(r.ltp) : "—"),
+        cell(rupee(r.value)),
+        barCell(signed(r.pnl, rupee), r.pnl, maxAbs),
+        cell(signed(r.pnl_pct, function (x) { return dec2.format(x); }) + "%", tone(r.pnl)),
+        r.day_change === null ? cell("—") : cell(signed(r.day_change, rupee), tone(r.day_change)));
+      tb.append(tr);
+    });
+    var empty = $("empty");
+    empty.hidden = list.length > 0;
+    if (!list.length) {
+      var anyFailed = Object.values(d.brokers).some(function (b) { return !b.ok; });
+      empty.textContent = state.kind === "position" ? "No open positions." : (anyFailed ? "Nothing to show. See the broker cards above." : "No holdings match.");
+    }
+  }
+
+  function cell(text, cls) { var td = el("td", "num " + (cls || "")); td.textContent = text; return td; }
+  function barCell(text, n, maxAbs) {
+    var td = el("td", "num " + tone(n)); var wrap = el("span", "bar");
+    wrap.style.setProperty("--w", (Math.abs(n) / maxAbs) * 100 + "%");
+    wrap.style.setProperty("--c", n >= 0 ? "var(--gain)" : "var(--loss)");
+    var s = el("span"); s.textContent = text; wrap.append(s); td.append(wrap); return td;
+  }
+
+  function seg(id, key) {
+    $(id).addEventListener("click", function (e) {
+      var b = e.target.closest("button[data-v]"); if (!b) return;
+      state[key] = b.dataset.v;
+      $(id).querySelectorAll("button").forEach(function (x) { x.setAttribute("aria-pressed", String(x === b)); });
+      if (state.data) renderTable();
+    });
+  }
+  seg("seg-kind", "kind"); seg("seg-broker", "broker");
+  $("q").addEventListener("input", function (e) { state.q = e.target.value; if (state.data) renderTable(); });
+  $("refresh").addEventListener("click", load);
+  document.addEventListener("visibilitychange", function () { if (!document.hidden && getToken()) load(); });
+  $("gate-form").addEventListener("submit", function (e) {
+    e.preventDefault(); setToken($("token").value.trim()); $("token").value = ""; load();
+  });
+
+  load();
+})();
+</script>
+</body>
+</html>
