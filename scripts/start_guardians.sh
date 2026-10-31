@@ -44,6 +44,17 @@ else:
 env_file.write_text("\n".join(lines) + "\n")
 PYEOF
 
+# deploy/all-guardians.service supervises this SAME script under systemd. A real
+# incident (2026-10-30: two processes both armed and raced to exit LAURUSLABS)
+# happened because this script had no check for it -- it happily started a
+# second tmux-based guardian on top of an already-running systemd one. Refuse
+# instead, the same way on_login.sh already does.
+if systemctl is-active --quiet all-guardians 2>/dev/null; then
+    echo "all-guardians.service is active -- NOT starting a tmux copy (it would duplicate exits)."
+    echo "Either use that service, or 'systemctl stop all-guardians && systemctl disable all-guardians' first."
+    exit 1
+fi
+
 # Retire the old two-session setup if either is still running, so there is
 # never a double-watcher on the same position (the old sessions and the new
 # combined one would otherwise both try to manage the same real trades).
