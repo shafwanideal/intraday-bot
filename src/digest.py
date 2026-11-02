@@ -304,7 +304,7 @@ def run_digest_loop(get_kite, notifier, should_stop=None, poll_interval: int = 3
         # to "nothing happened yet" until EOD_TABLE_TIME came and went with no table.
         if now.hour != last_heartbeat_hour:
             last_heartbeat_hour = now.hour
-            _log(f"digest thread alive, next fire at {EOD_TABLE_TIME} IST (sent today: {bool(sent_today)})")
+            _log(f"digest thread alive, next fire at {EOD_TABLE_TIME} IST (sent today: {now.date() in sent_today})")
         if now.time() >= EOD_TABLE_TIME and now.date() not in sent_today:
             sent_today.add(now.date())
             try:
