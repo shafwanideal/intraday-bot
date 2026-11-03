@@ -95,15 +95,27 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 SWING_STATE_FILE = PROJECT_ROOT / "swing_positions_state.json"
 LOG_DIR = PROJECT_ROOT / "logs"
 
-# Snapshot of every MTF symbol's avg_price/qty as of the FIRST successful poll of
-# each calendar day -- the cost basis BEFORE any of today's own buys/sells. Needed
-# by src/hourly_pnl.py: kite.orders() only covers TODAY, so a position that was
+# Continuously-updated cache of every MTF symbol's LAST KNOWN avg_price/qty --
+# written on EVERY successful poll for every symbol currently held, and never
+# cleared for a symbol that disappears (it just keeps its last value). Needed by
+# src/hourly_pnl.py: kite.orders() only covers TODAY, so a position that was
 # already open before today (a genuine carried-over swing holding) has no "today's
-# BUY order" to match its close against -- this snapshot supplies that missing
+# BUY order" to match its close against -- this cache supplies that missing
 # opening leg so a carried position's close (bot-triggered OR manually placed by
 # the trader) still gets a correct realized P&L instead of looking like an
 # unmatched, cost-basis-less sell.
-MTF_DAY_OPEN_FILE = PROJECT_ROOT / "logs" / "mtf_day_open.json"
+#
+# Deliberately NOT a once-a-day snapshot taken at "the first poll of the day" --
+# that was the first version of this (2026-11-03) and it had a real bug: this
+# system gets restarted mid-session often (a code deployment), and a snapshot
+# taken at an arbitrary mid-day restart, rather than at true market open, would
+# already reflect any swing trade closed EARLIER that same day, silently
+# corrupting the seed for it. avg_price only ever changes when MORE is bought
+# (never when something is sold), so "whatever was last recorded, whenever that
+# was" is always correct regardless of restart timing -- a continuously-updated
+# cache sidesteps the whole problem instead of trying to catch the exact right
+# moment once a day.
+MTF_COST_BASIS_FILE = PROJECT_ROOT / "logs" / "mtf_cost_basis.json"
 
 MARKET_OPEN = time(9, 15)
 MARKET_CLOSE = time(15, 30)
@@ -397,28 +409,23 @@ def _trail_pct_for(st: dict, today: date) -> float:
     return TRAILING_PCT
 
 
-def _snapshot_day_open_if_needed(positions: dict[str, dict], today: date) -> None:
-    """Writes MTF_DAY_OPEN_FILE once per calendar day, on the first poll whose
-    fetch actually succeeded -- see that constant's own comment for why this
-    exists. A no-op (cheap file-mtime-free read of the stored date) on every
-    other poll for the rest of the day. Never raises: a snapshot failure must
-    not take a guardian down over what is purely a reporting convenience."""
+def _update_mtf_cost_basis_cache(positions: dict[str, dict]) -> None:
+    """Updates MTF_COST_BASIS_FILE with every CURRENTLY held MTF symbol's
+    avg_price/qty -- see that constant's own comment for why this runs every
+    poll rather than once a day. Only UPDATES entries for symbols present in
+    `positions`; a symbol that has since closed keeps whatever its last
+    recorded entry was, which is exactly the value needed to seed its close.
+    Never raises: a cache-write failure must not take a guardian down over
+    what is purely a reporting convenience."""
     try:
-        existing = json.loads(MTF_DAY_OPEN_FILE.read_text()) if MTF_DAY_OPEN_FILE.exists() else {}
+        cache = json.loads(MTF_COST_BASIS_FILE.read_text()) if MTF_COST_BASIS_FILE.exists() else {}
     except (json.JSONDecodeError, OSError):
-        existing = {}
-    if existing.get("date") == today.isoformat():
-        return
+        cache = {}
+    for symbol, p in positions.items():
+        cache[symbol] = {"average_price": p["average_price"], "quantity": p["quantity"]}
     try:
-        snapshot = {
-            "date": today.isoformat(),
-            "positions": {
-                symbol: {"average_price": p["average_price"], "quantity": p["quantity"]}
-                for symbol, p in positions.items()
-            },
-        }
-        MTF_DAY_OPEN_FILE.parent.mkdir(exist_ok=True)
-        MTF_DAY_OPEN_FILE.write_text(json.dumps(snapshot))
+        MTF_COST_BASIS_FILE.parent.mkdir(exist_ok=True)
+        MTF_COST_BASIS_FILE.write_text(json.dumps(cache))
     except OSError:
         pass
 
@@ -440,7 +447,7 @@ def check_once(kite, state: dict[str, dict], logger: SwingLogger) -> None:
         logger.event("swing_poll_skipped_fetch_failed")
         return
 
-    _snapshot_day_open_if_needed(positions, today)
+    _update_mtf_cost_basis_cache(positions)
 
     for symbol in list(state.keys()):
         if symbol in positions:

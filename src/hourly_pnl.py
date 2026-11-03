@@ -24,8 +24,17 @@ and manual trades uniformly, for BOTH MIS and MTF.
 The one gap plain FIFO-over-today's-orders has: a genuinely carried-over
 swing (MTF) position's original BUY happened on a PREVIOUS day, so it has
 no "today's order" to match its close against. src/swing_live.py's own
-MTF_DAY_OPEN_FILE snapshot (taken once each morning, before today's first
-buy/sell) supplies that missing opening leg -- see its own docstring.
+MTF_COST_BASIS_FILE -- a continuously-updated cache of each MTF symbol's
+last known avg_price/qty, not a once-a-day snapshot (see its own docstring
+for why: this system gets restarted mid-session often, and a point-in-time
+snapshot would miss a trade closed before that restart) -- supplies that
+missing opening leg, but ONLY for a symbol with no BUY order of its own
+today: if a symbol was ALSO bought today (restart aside, a trader averaging
+into an existing carried position on the very day they close it), the cache
+is skipped and the close is matched only against today's own orders, which
+under-counts the pre-existing carried lot's P&L -- a known, accepted
+limitation of this simpler approach, not something to silently get wrong
+the other way (double-counting) by seeding on top of a same-day buy too.
 """
 
 import json
@@ -35,7 +44,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from . import orders
-from .swing_live import MTF_DAY_OPEN_FILE
+from .swing_live import MTF_COST_BASIS_FILE
 
 IST = ZoneInfo("Asia/Kolkata")
 LOG_DIR = Path(__file__).resolve().parent.parent / "logs"
@@ -66,14 +75,11 @@ def _signed_rupees(amount: float) -> str:
     return f"{sign}Rs {abs(amount):,.2f}"
 
 
-def _load_day_open_snapshot(today: date) -> dict[str, dict]:
+def _load_mtf_cost_basis_cache() -> dict[str, dict]:
     try:
-        data = json.loads(MTF_DAY_OPEN_FILE.read_text())
+        return json.loads(MTF_COST_BASIS_FILE.read_text())
     except (OSError, json.JSONDecodeError):
         return {}
-    if data.get("date") != today.isoformat():
-        return {}
-    return data.get("positions", {})
 
 
 def _fifo_realized(orders_today: list[dict], seed: tuple[float, int] | None) -> tuple[float, int]:
@@ -118,7 +124,6 @@ def build_hourly_report(kite) -> str | None:
     -- cumulative for the whole day, not just since the last report, so each
     hour's message stands alone. Returns None if nothing has closed yet (no
     message sent that hour)."""
-    today = datetime.now(IST).date()
     try:
         all_orders = kite.orders()
     except orders.PLACEMENT_EXCEPTIONS as exc:
@@ -131,14 +136,20 @@ def build_hourly_report(kite) -> str | None:
             continue
         by_symbol_product.setdefault((o["tradingsymbol"], o["product"]), []).append(o)
 
-    day_open = _load_day_open_snapshot(today)
+    cost_basis_cache = _load_mtf_cost_basis_cache()
 
     rows: list[tuple[str, str, int, float]] = []
     total = 0.0
     for (symbol, product), order_list in sorted(by_symbol_product.items()):
         seed = None
-        if product == orders.PRODUCT_MTF:
-            carried = day_open.get(symbol)
+        # Only seed from the cache when there's no BUY of this symbol in today's
+        # own orders -- if there IS one, the position was (at least partly) opened
+        # today and matching today's orders alone is correct; seeding on top of
+        # that too would double-count the same-day buy. See this module's own
+        # docstring for the resulting known limitation (a same-day top-up of an
+        # existing carried position).
+        if product == orders.PRODUCT_MTF and not any(o["transaction_type"] == "BUY" for o in order_list):
+            carried = cost_basis_cache.get(symbol)
             if carried:
                 seed = (carried["average_price"], carried["quantity"])
         realized, closed_qty = _fifo_realized(order_list, seed)
