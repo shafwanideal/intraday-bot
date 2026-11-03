@@ -53,6 +53,21 @@ only ever rise above that level as price climbs further, never fall below it
 pullback calc applied to the just-armed peak can itself sit below the arm
 level (a whipsaw right after arming could exit with less than the guaranteed
 breakeven% + 2% the arm threshold was meant to lock in).
+
+SAME-DAY MTF ENTRIES ARE TREATED LIKE INTRADAY, NOT SWING, per explicit
+instruction (2026-11-03): the trader places BUY-side intraday trades as MTF
+rather than MIS -- MIS buys sometimes get blocked by the broker, and MTF
+lets the position carry overnight if it moves against them -- but SELL-side
+(short) intraday trades stay MIS and are handled entirely by
+intraday_live.py already. So a position whose entry_date is TODAY arms/
+trails using the SAME thresholds as the intraday guardian (time-of-day arm
+%, see _same_day_arm_threshold_pct, and GRID_PCT/2 trail) instead of
+waiting for swing's wider breakeven-adjusted 2%+ target. Only once a
+position survives to a SECOND day (the trader chose to carry it, exactly
+like converting an intraday trade into a swing trade) does it switch over
+to the breakeven-adjusted swing rules below -- entry_date is the only
+signal needed for this, and it is already tracked per symbol, so the
+switch happens automatically with no new state.
 """
 
 import json
@@ -62,7 +77,17 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from . import alerts, auth, config, heartbeat, orders
+from .strategy import (
+    GRID_PCT,
+    TRAILING_ACTIVATION_CUTOVER_TIME,
+    TRAILING_ACTIVATION_PCT,
+    TRAILING_ACTIVATION_PCT_AFTER_NOON,
+)
 from .swing_strategy import PROFIT_TARGET_PCT, TRAILING_PCT, compute_mtf_breakeven_pct
+
+# Same percentages the intraday guardian uses -- kept in sync by importing the
+# same underlying constants rather than hardcoding a second copy of 1% / 0.5% / 0.75%.
+SAME_DAY_TRAIL_PCT = GRID_PCT / 2
 
 IST = ZoneInfo("Asia/Kolkata")
 
@@ -313,6 +338,20 @@ def _funded_amount_for_position(kite, symbol: str, quantity: int, avg_price: flo
     return max(0.0, position_value - required_margin)
 
 
+def _is_same_day_entry(st: dict, today: date) -> bool:
+    return date.fromisoformat(st["entry_date"]) == today
+
+
+def _same_day_arm_threshold_pct(now: datetime) -> float:
+    """Identical rule to intraday_live._activation_pct_at: tighter after
+    11 AM since less of the day remains. Kept as a local copy (not an
+    import of that function) because it takes a plain datetime here, not
+    the intraday module's own _now() -- same constants, same values."""
+    if now.time() >= TRAILING_ACTIVATION_CUTOVER_TIME:
+        return TRAILING_ACTIVATION_PCT_AFTER_NOON
+    return TRAILING_ACTIVATION_PCT
+
+
 def _arm_threshold_pct(kite, symbol: str, pos: dict, st: dict, today: date, logger: SwingLogger) -> float:
     """breakeven% (for however long this position has actually been held) +
     PROFIT_TARGET_PCT -- see this module's own docstring for why the arm
@@ -320,7 +359,14 @@ def _arm_threshold_pct(kite, symbol: str, pos: dict, st: dict, today: date, logg
     back to the flat PROFIT_TARGET_PCT alone if the funded amount isn't
     known (logged once, not every poll, via the caller checking
     st['funded_amount'] is already None before calling this with a fresh
-    fetch attempt)."""
+    fetch attempt).
+
+    EXCEPT: a position entered TODAY uses the same time-of-day threshold as
+    the intraday guardian instead -- see this module's own docstring,
+    "SAME-DAY MTF ENTRIES ARE TREATED LIKE INTRADAY". This check is first
+    and needs no funded_amount at all, since it doesn't use breakeven."""
+    if _is_same_day_entry(st, today):
+        return _same_day_arm_threshold_pct(_now())
     if st["funded_amount"] is None:
         return PROFIT_TARGET_PCT
     entry_date = date.fromisoformat(st["entry_date"])
@@ -328,6 +374,17 @@ def _arm_threshold_pct(kite, symbol: str, pos: dict, st: dict, today: date, logg
     position_value = pos["quantity"] * pos["average_price"]
     breakeven_pct = compute_mtf_breakeven_pct(position_value, st["funded_amount"], days_held)
     return breakeven_pct + PROFIT_TARGET_PCT
+
+
+def _trail_pct_for(st: dict, today: date) -> float:
+    """Which pullback-from-peak percentage applies right now -- re-evaluated
+    every poll (not fixed at arm time) so a position that arms same-day
+    under the tight intraday-style trail automatically widens to swing's
+    own TRAILING_PCT the moment it's carried into a second day, matching
+    _arm_threshold_pct's same same-day/carried split."""
+    if _is_same_day_entry(st, today):
+        return SAME_DAY_TRAIL_PCT
+    return TRAILING_PCT
 
 
 def check_once(kite, state: dict[str, dict], logger: SwingLogger) -> None:
@@ -425,14 +482,18 @@ def check_once(kite, state: dict[str, dict], logger: SwingLogger) -> None:
 
         if st["trailing"]:
             st["peak_price"] = max(st["peak_price"], ltp)
-            # Floored at the price that armed trailing (breakeven% + PROFIT_TARGET_PCT) --
-            # peak*(1-TRAILING_PCT) alone can sit BELOW that arm price right after arming
-            # whenever the overshoot past the arm threshold is smaller than TRAILING_PCT
-            # itself (e.g. armed right at the threshold with no overshoot, a 1% pullback
-            # from that same peak would otherwise erase part of the guaranteed arm-level
-            # profit). The floor makes the stop only ever rise from the arm level as price
-            # climbs further, never fall below it.
-            stop_level = max(st.get("floor_price", 0.0), st["peak_price"] * (1 - TRAILING_PCT))
+            # Floored at the price that armed trailing (breakeven% + PROFIT_TARGET_PCT, or
+            # the same-day intraday-style threshold -- see _arm_threshold_pct) -- peak*(1-trail_pct)
+            # alone can sit BELOW that arm price right after arming whenever the overshoot past
+            # the arm threshold is smaller than trail_pct itself (e.g. armed right at the
+            # threshold with no overshoot, a pullback from that same peak would otherwise erase
+            # part of the guaranteed arm-level profit). The floor makes the stop only ever rise
+            # from the arm level as price climbs further, never fall below it.
+            # trail_pct is re-evaluated every poll, not fixed at arm time, so a position armed
+            # same-day under the tight intraday-style trail automatically widens to swing's own
+            # TRAILING_PCT the moment it's carried into a second day -- see _trail_pct_for.
+            trail_pct = _trail_pct_for(st, today)
+            stop_level = max(st.get("floor_price", 0.0), st["peak_price"] * (1 - trail_pct))
             if ltp > stop_level:
                 continue
 
@@ -480,8 +541,10 @@ def check_once(kite, state: dict[str, dict], logger: SwingLogger) -> None:
                 st["trailing"] = True
                 st["peak_price"] = ltp
                 st["floor_price"] = avg_price * (1 + arm_pct)
+                mode = "same_day_intraday_style" if _is_same_day_entry(st, today) else "carried_swing_breakeven_style"
                 logger.event(
-                    "swing_trailing_armed", symbol=symbol, avg_price=avg_price, armed_at=ltp, arm_pct=round(arm_pct * 100, 3)
+                    "swing_trailing_armed", symbol=symbol, avg_price=avg_price, armed_at=ltp,
+                    arm_pct=round(arm_pct * 100, 3), mode=mode
                 )
 
 
