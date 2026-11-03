@@ -95,6 +95,16 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 SWING_STATE_FILE = PROJECT_ROOT / "swing_positions_state.json"
 LOG_DIR = PROJECT_ROOT / "logs"
 
+# Snapshot of every MTF symbol's avg_price/qty as of the FIRST successful poll of
+# each calendar day -- the cost basis BEFORE any of today's own buys/sells. Needed
+# by src/hourly_pnl.py: kite.orders() only covers TODAY, so a position that was
+# already open before today (a genuine carried-over swing holding) has no "today's
+# BUY order" to match its close against -- this snapshot supplies that missing
+# opening leg so a carried position's close (bot-triggered OR manually placed by
+# the trader) still gets a correct realized P&L instead of looking like an
+# unmatched, cost-basis-less sell.
+MTF_DAY_OPEN_FILE = PROJECT_ROOT / "logs" / "mtf_day_open.json"
+
 MARKET_OPEN = time(9, 15)
 MARKET_CLOSE = time(15, 30)
 # Swing positions move on the order of minutes to days, not seconds -- no
@@ -387,6 +397,32 @@ def _trail_pct_for(st: dict, today: date) -> float:
     return TRAILING_PCT
 
 
+def _snapshot_day_open_if_needed(positions: dict[str, dict], today: date) -> None:
+    """Writes MTF_DAY_OPEN_FILE once per calendar day, on the first poll whose
+    fetch actually succeeded -- see that constant's own comment for why this
+    exists. A no-op (cheap file-mtime-free read of the stored date) on every
+    other poll for the rest of the day. Never raises: a snapshot failure must
+    not take a guardian down over what is purely a reporting convenience."""
+    try:
+        existing = json.loads(MTF_DAY_OPEN_FILE.read_text()) if MTF_DAY_OPEN_FILE.exists() else {}
+    except (json.JSONDecodeError, OSError):
+        existing = {}
+    if existing.get("date") == today.isoformat():
+        return
+    try:
+        snapshot = {
+            "date": today.isoformat(),
+            "positions": {
+                symbol: {"average_price": p["average_price"], "quantity": p["quantity"]}
+                for symbol, p in positions.items()
+            },
+        }
+        MTF_DAY_OPEN_FILE.parent.mkdir(exist_ok=True)
+        MTF_DAY_OPEN_FILE.write_text(json.dumps(snapshot))
+    except OSError:
+        pass
+
+
 def check_once(kite, state: dict[str, dict], logger: SwingLogger) -> None:
     """One pass: reconcile tracked state against Kite's real MTF positions,
     then apply breakeven-adjusted-profit-target-arm / trailing-stop logic
@@ -403,6 +439,8 @@ def check_once(kite, state: dict[str, dict], logger: SwingLogger) -> None:
         # trailing stop) is left exactly as it was for the next successful poll.
         logger.event("swing_poll_skipped_fetch_failed")
         return
+
+    _snapshot_day_open_if_needed(positions, today)
 
     for symbol in list(state.keys()):
         if symbol in positions:
