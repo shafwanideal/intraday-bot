@@ -106,7 +106,7 @@ def _intraday_armed_symbols(today_str: str) -> set[str]:
         kind, sym = rec.get("kind"), rec.get("symbol")
         if kind == "intraday_trailing_armed":
             armed.add(sym)
-        elif kind in ("intraday_exit", "intraday_square_off", "intraday_position_closed_externally"):
+        elif kind in ("intraday_exit", "intraday_stop_loss_exit", "intraday_square_off", "intraday_position_closed_externally"):
             armed.discard(sym)
     return armed
 
@@ -224,7 +224,7 @@ def _intraday_section(kite, today_str: str) -> str:
 
 def _sold_today_section(today_str: str) -> str:
     records = _todays_log_records("swing_*.jsonl", today_str) + _todays_log_records("intraday_manual_*.jsonl", today_str)
-    sells = [r for r in records if r.get("kind") in ("swing_exit", "intraday_exit", "intraday_square_off")]
+    sells = [r for r in records if r.get("kind") in ("swing_exit", "intraday_exit", "intraday_stop_loss_exit", "intraday_square_off")]
     if not sells:
         return "No sells today."
     sells.sort(key=lambda r: r.get("timestamp", ""))
@@ -241,7 +241,12 @@ def _sold_today_section(today_str: str) -> str:
             pnl = r.get("gross_pnl")
             pnl_label = "gross"
         else:
-            reason = "15:08 square-off" if r["kind"] == "intraday_square_off" else "trailing stop"
+            if r["kind"] == "intraday_square_off":
+                reason = "15:08 square-off"
+            elif r["kind"] == "intraday_stop_loss_exit":
+                reason = "STOP-LOSS"
+            else:
+                reason = "trailing stop"
             direction = r.get("direction", "long")
             pnl = (price - avg) * qty * (1 if direction == "long" else -1) if None not in (price, avg, qty) else None
             pnl_label = "gross"

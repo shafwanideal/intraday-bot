@@ -26,8 +26,15 @@ def format_event(kind: str, fields: dict, label: str = "") -> str:
             direction = fields.get("direction", "long")
             qty, price, avg = fields.get("qty"), fields.get("price"), fields.get("avg_price")
             verb = "SOLD" if direction == "long" else "BOUGHT BACK (short covered)"
-            why = " at the 15:08 square-off" if kind.endswith("_square_off") else " by the trailing stop"
-            line = f"✅ {tag}{verb}{why} — {sym}\n{qty} @ {_money(price)}"
+            is_stop_loss = kind.endswith("_stop_loss_exit")
+            if kind.endswith("_square_off"):
+                why = " at the 15:08 square-off"
+            elif is_stop_loss:
+                why = " by the STOP-LOSS"
+            else:
+                why = " by the trailing stop"
+            emoji = "🛑" if is_stop_loss else "✅"
+            line = f"{emoji} {tag}{verb}{why} — {sym}\n{qty} @ {_money(price)}"
             if "gross_pnl" in fields:
                 line += f" (avg {_money(avg)}), gross P&L {_money(fields['gross_pnl'])} before charges"
             elif avg is not None and price is not None and qty is not None:

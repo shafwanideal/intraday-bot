@@ -86,6 +86,15 @@ POLL_INTERVAL_SECONDS = 5  # faster than swing (intraday moves faster), but see 
 # position regardless of direction or trailing-arm state.
 BIG_MOVE_PCT = 0.03
 
+# Hard stop-loss, requested 2026-11-04: EVERY MIS position must have one; MTF
+# doesn't need one (carrying overnight against you is the whole point of using
+# MTF there instead of MIS -- see swing_live.py's own docstring). Checked
+# UNCONDITIONALLY, armed or not, as an outer safety bound independent of the
+# trailing-stop logic below -- without this, a position that never reaches its
+# arm threshold has NO downside protection at all until the 15:08 square-off,
+# no matter how far it falls against the trader in the meantime.
+STOP_LOSS_PCT = 0.03
+
 
 def _now() -> datetime:
     return datetime.now(IST)
@@ -98,6 +107,7 @@ class IntradayLogger:
         "intraday_position_detected",
         "intraday_trailing_armed",
         "intraday_exit",
+        "intraday_stop_loss_exit",
         "intraday_square_off",
         "intraday_position_closed_externally",
         "intraday_big_move",
@@ -320,6 +330,25 @@ def check_once(kite, state: dict[str, dict], logger: IntradayLogger) -> None:
                 del state[symbol]
             continue
 
+        move = move_pct(direction, avg_price, ltp)  # signed: positive = in the trader's favor
+
+        # Hard stop-loss -- checked BEFORE and independent of trailing-arm state, so an
+        # unarmed position is never left with zero downside protection (see STOP_LOSS_PCT).
+        if move <= -STOP_LOSS_PCT:
+            fill = _place_exit(kite, symbol, direction, qty, ltp, "intraday_stop_loss", logger)
+            if fill is not None:
+                logger.event(
+                    "intraday_stop_loss_exit",
+                    symbol=symbol,
+                    direction=direction,
+                    qty=fill["filled_quantity"],
+                    price=fill["average_price"],
+                    avg_price=avg_price,
+                    move_pct=round(move * 100, 2),
+                )
+                del state[symbol]
+            continue
+
         if st["trailing"]:
             activation_pct = st["armed_activation_pct"]
             lock_price = avg_price * (1 + activation_pct) if direction == "long" else avg_price * (1 - activation_pct)
@@ -347,7 +376,6 @@ def check_once(kite, state: dict[str, dict], logger: IntradayLogger) -> None:
                     )
                     del state[symbol]
         else:
-            move = move_pct(direction, avg_price, ltp)
             arm_threshold = _activation_pct_at(now)
             if move >= arm_threshold:
                 st["trailing"] = True
