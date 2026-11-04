@@ -86,14 +86,14 @@ POLL_INTERVAL_SECONDS = 5  # faster than swing (intraday moves faster), but see 
 # position regardless of direction or trailing-arm state.
 BIG_MOVE_PCT = 0.03
 
-# Hard stop-loss, requested 2026-11-04: EVERY MIS position must have one; MTF
-# doesn't need one (carrying overnight against you is the whole point of using
-# MTF there instead of MIS -- see swing_live.py's own docstring). Checked
-# UNCONDITIONALLY, armed or not, as an outer safety bound independent of the
-# trailing-stop logic below -- without this, a position that never reaches its
-# arm threshold has NO downside protection at all until the 15:08 square-off,
-# no matter how far it falls against the trader in the meantime.
-STOP_LOSS_PCT = 0.03
+# Hard stop-loss, requested 2026-11-04 (lowered from 3% to 2% the same day): EVERY
+# MIS position must have one; MTF doesn't need one (carrying overnight against you
+# is the whole point of using MTF there instead of MIS -- see swing_live.py's own
+# docstring). Checked UNCONDITIONALLY, armed or not, as an outer safety bound
+# independent of the trailing-stop logic below -- without this, a position that
+# never reaches its arm threshold has NO downside protection at all until the
+# 15:08 square-off, no matter how far it falls against the trader in the meantime.
+STOP_LOSS_PCT = 0.02
 
 
 def _now() -> datetime:
