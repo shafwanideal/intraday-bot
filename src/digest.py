@@ -58,6 +58,11 @@ def _money(x) -> str:
     return f"{x:,.2f}"
 
 
+def _signed_money(x) -> str:
+    sign = "+" if x >= 0 else "-"
+    return f"{sign}₹{abs(x):,.2f}"
+
+
 def _escape_html(s: str) -> str:
     return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
@@ -222,14 +227,17 @@ def _intraday_section(kite, today_str: str) -> str:
     return f"<pre>{table}</pre>\nIntraday TOTAL (gross): ₹{_money(total_gross)}"
 
 
-def _sold_today_section(today_str: str) -> str:
+def _sold_today_section(today_str: str) -> tuple[str, float]:
+    """Returns (formatted lines, total gross P&L across every sell today) --
+    the total is needed by build_eod_table for the grand-total summary line."""
     records = _todays_log_records("swing_*.jsonl", today_str) + _todays_log_records("intraday_manual_*.jsonl", today_str)
     sells = [r for r in records if r.get("kind") in ("swing_exit", "intraday_exit", "intraday_stop_loss_exit", "intraday_square_off")]
     if not sells:
-        return "No sells today."
+        return "No sells today.", 0.0
     sells.sort(key=lambda r: r.get("timestamp", ""))
 
     lines = []
+    total = 0.0
     for r in sells:
         sym = r.get("symbol", "?")
         qty = r.get("qty")
@@ -237,10 +245,12 @@ def _sold_today_section(today_str: str) -> str:
         avg = r.get("avg_price")
         ts = r.get("timestamp", "")[11:16] or "--:--"
         if r["kind"] == "swing_exit":
+            product = "MTF"
             reason = "trailing stop"
             pnl = r.get("gross_pnl")
             pnl_label = "gross"
         else:
+            product = "MIS"
             if r["kind"] == "intraday_square_off":
                 reason = "15:08 square-off"
             elif r["kind"] == "intraday_stop_loss_exit":
@@ -250,9 +260,11 @@ def _sold_today_section(today_str: str) -> str:
             direction = r.get("direction", "long")
             pnl = (price - avg) * qty * (1 if direction == "long" else -1) if None not in (price, avg, qty) else None
             pnl_label = "gross"
+        if pnl is not None:
+            total += pnl
         pnl_str = f"₹{_money(pnl)} ({pnl_label})" if pnl is not None else "n/a"
-        lines.append(f"  {ts}  {sym} — {qty} @ ₹{_money(price)} ({reason}) → P&L {pnl_str}")
-    return _escape_html("\n".join(lines))
+        lines.append(f"  {ts}  {sym} ({product}) — {qty} @ ₹{_money(price)} ({reason}) → P&L {pnl_str}")
+    return _escape_html("\n".join(lines)), total
 
 
 def build_eod_table(kite) -> str | None:
@@ -267,17 +279,22 @@ def build_eod_table(kite) -> str | None:
         has_intraday = bool([p for p in kite.positions().get("day", []) if p.get("product") == "MIS" and p.get("quantity", 0) != 0])
     except Exception as exc:  # noqa: BLE001
         return f"⚠️ End-of-day report failed -- couldn't fetch positions: {exc}"
-    sold_text = _sold_today_section(today_str)
+    sold_text, sold_total = _sold_today_section(today_str)
     if not has_swing and not has_intraday and sold_text == "No sells today.":
         return None
 
     swing_text = _swing_section(kite, today)
     intraday_text = _intraday_section(kite, today_str)
+    total_line = (
+        f"<b>Total realized P&amp;L today (gross, all sells): {_signed_money(sold_total)}</b>\n\n"
+        if sold_text != "No sells today." else ""
+    )
 
     return (f"📋 End-of-day report — {today_str}\n\n"
             f"<b>Swing (MTF) holdings:</b>\n{swing_text}\n\n"
             f"<b>Intraday (MIS) positions:</b>\n{intraday_text}\n\n"
             f"<b>Sold today:</b>\n{sold_text}\n\n"
+            f"{total_line}"
             f"* = trailing already armed")
 
 
