@@ -1,7 +1,11 @@
 """Read-only: which Groww market-data calls does this key allow? Places NO orders."""
+import sys
 from datetime import datetime, timedelta
+from pathlib import Path
 
-from src.groww_client import get_groww
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from src.groww_client import get_groww  # noqa: E402
 
 g = get_groww()
 end = datetime.now()

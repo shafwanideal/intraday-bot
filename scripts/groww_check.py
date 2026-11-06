@@ -1,5 +1,10 @@
 """Read-only Groww connectivity check. Places NO orders."""
-from src.groww_client import get_groww
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from src.groww_client import get_groww  # noqa: E402
 
 g = get_groww()
 print("Logged in.")

@@ -10,8 +10,12 @@ exposes instead of going stale if Groww renames something.
 """
 
 import re
+import sys
+from pathlib import Path
 
-from src.groww_client import get_groww
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from src.groww_client import get_groww  # noqa: E402
 
 g = get_groww()
 print("Logged in.")
