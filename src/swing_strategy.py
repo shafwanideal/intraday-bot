@@ -181,6 +181,7 @@ class SwingEngine:
         apply_costs: bool = True,
         max_total_capital: float | None = None,
         stop_fill_at_level: bool = False,
+        stop_loss_pct: float | None = None,
     ):
         self.capital_per_leg = capital_per_leg
         self.averaging_drop_pct = averaging_drop_pct
@@ -209,6 +210,14 @@ class SwingEngine:
         # order fills at the open, and no stop protects against a gap).
         # Still optimistic: it ignores slippage past the level in a fast market.
         self.stop_fill_at_level = stop_fill_at_level
+        # Hard stop BELOW the current blended average, checked only while the
+        # position has not yet armed. Once armed the trailing stop is floored at
+        # the arm price, which already sits above breakeven, so a stop can no
+        # longer help there. None keeps the documented historical behaviour: a
+        # position that never reaches the profit target is held indefinitely.
+        # That is the hole this closes -- on 2026-10-27 eight live MTF holdings
+        # had no floor of any kind under them.
+        self.stop_loss_pct = stop_loss_pct
         self.open_positions: dict[str, SwingPosition] = {}
         self.closed_trades: list[dict] = []
 
@@ -293,6 +302,18 @@ class SwingEngine:
             if price <= stop_level:
                 return self._close(symbol, price, date, "trailing_stop_exit")
             return None
+
+        if self.stop_loss_pct is not None:
+            # Not yet armed (the trailing branch returned above), so nothing is
+            # protecting this position. Same resting-order semantics as the
+            # trailing stop: a gap-down fills at the open, not at a level the
+            # stock never traded at.
+            sl_level = pos.avg_price * (1 - self.stop_loss_pct)
+            if self.stop_fill_at_level and low is not None and low <= sl_level:
+                fill = min(open_, sl_level) if open_ is not None else sl_level
+                return self._close(symbol, fill, date, "stop_loss_exit")
+            if price <= sl_level:
+                return self._close(symbol, price, date, "stop_loss_exit")
 
         if price >= pos.avg_price * (1 + self.profit_target_pct):
             pos.trailing = True
