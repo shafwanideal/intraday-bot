@@ -7,13 +7,9 @@ This is NOT the automated picks engine (src/live.py, run via scripts/daily.py)
 profit target, portfolio floor, square-off) for the symbols YOU typed in as
 today's picks. This module exists for the OTHER case: an intraday trade you
 place on impulse, outside that flow, that would otherwise sit with zero
-protection. It applies the same original per-stock trailing-SL rule you
-specified for the automated engine (src/strategy.py's
-TRAILING_ACTIVATION_PCT / TRAILING_ACTIVATION_PCT_AFTER_NOON /
-TRAILING_ACTIVATION_CUTOVER_TIME / trail_pct) to ANY MIS position it finds
-that it hasn't seen before -- never places an entry, only ever an exit,
-which is what makes this safe to run unattended with no CONFIRM gate, same
-argument as swing_live.py and run_live.py's protect_only mode.
+protection. It never places an entry, only ever an exit, which is what
+makes this safe to run unattended with no CONFIRM gate, same argument as
+swing_live.py and run_live.py's protect_only mode.
 
 IMPORTANT -- do not run this at the same time as scripts/run_live.py is
 actively managing the SAME symbol: that would mean two independent
@@ -23,16 +19,16 @@ in today's TODAYS_STOCKS_FILE (live.py's own plan file) -- those are
 presumed to already be run_live.py's responsibility if it's running today.
 It only tracks MIS positions outside that plan.
 
-Mechanics, copied faithfully from strategy.GridEngine.update() (see that
-docstring for the full reasoning) since reusing GridEngine directly doesn't
-fit here -- GridEngine owns portfolio-level daily_pnl/loss-cap/profit-target
-state that makes no sense for a single stray manual trade with no "today's
-total plan capital" context:
-- Arms at TRAILING_ACTIVATION_PCT (1%) before TRAILING_ACTIVATION_CUTOVER_TIME
-  (11:00 IST), TRAILING_ACTIVATION_PCT_AFTER_NOON (0.5%) from then on, for a
-  position not yet armed. The activation pct a position actually armed at is
-  fixed at arm time (armed_activation_pct) -- a later time-based tightening
-  never retroactively moves an already-armed position's floor.
+Mechanics:
+- Arms at a BREAKEVEN%-derived threshold (added 2026-11-08, explicit
+  request -- a flat % of avg_price wasn't accounting for real round-trip
+  cost): strategy.compute_intraday_breakeven_pct solves this trade's real
+  intraday brokerage/STT/exchange/GST cost as a % of position value, and
+  INTRADAY_ARM_MARGIN_PCT (1%) is required on top before arming. The
+  activation pct a position actually armed at is fixed at arm time
+  (armed_activation_pct) -- a later move in cost-% (position size doesn't
+  change, so in practice this is stable) never retroactively moves an
+  already-armed position's floor.
 - Once armed, trails trail_pct (0.75%, GRID_PCT/2) behind the peak, with a
   lock-in floor at the armed activation level -- the stop can ratchet up
   toward the peak but never back down past the level that locked in the
@@ -56,9 +52,7 @@ from .live import TODAYS_STOCKS_FILE
 from .strategy import (
     GRID_PCT,
     SQUARE_OFF_TIME,
-    TRAILING_ACTIVATION_CUTOVER_TIME,
-    TRAILING_ACTIVATION_PCT,
-    TRAILING_ACTIVATION_PCT_AFTER_NOON,
+    compute_intraday_breakeven_pct,
     move_pct,
 )
 
@@ -94,6 +88,12 @@ BIG_MOVE_PCT = 0.03
 # never reaches its arm threshold has NO downside protection at all until the
 # 15:08 square-off, no matter how far it falls against the trader in the meantime.
 STOP_LOSS_PCT = 0.02
+
+# Margin required on top of this trade's real breakeven% before trailing arms --
+# see compute_intraday_breakeven_pct in strategy.py. Mirrors swing_live.py's
+# PROFIT_TARGET_PCT role for MTF, just a smaller number since MIS round-trips
+# same-day and has no MTF interest/pledge cost to recover.
+INTRADAY_ARM_MARGIN_PCT = 0.01
 
 
 def _now() -> datetime:
@@ -223,10 +223,13 @@ def _fetch_ltp(kite, symbols: list[str]) -> dict[str, float]:
     return result
 
 
-def _activation_pct_at(timestamp: datetime) -> float:
-    if timestamp.time() >= TRAILING_ACTIVATION_CUTOVER_TIME:
-        return TRAILING_ACTIVATION_PCT_AFTER_NOON
-    return TRAILING_ACTIVATION_PCT
+def _arm_threshold_pct(direction: str, avg_price: float, qty: float) -> float:
+    """breakeven% (this trade's real intraday round-trip cost, see
+    compute_intraday_breakeven_pct) + INTRADAY_ARM_MARGIN_PCT. Replaced the
+    old flat 1%/0.5% time-of-day threshold 2026-11-08 -- that never
+    accounted for real cost at all, unlike the swing/MTF guardian."""
+    position_value = avg_price * qty
+    return compute_intraday_breakeven_pct(direction, position_value) + INTRADAY_ARM_MARGIN_PCT
 
 
 def _place_exit(kite, symbol: str, direction: str, qty: int, ref_price: float, tag: str, logger: IntradayLogger) -> dict | None:
@@ -376,7 +379,7 @@ def check_once(kite, state: dict[str, dict], logger: IntradayLogger) -> None:
                     )
                     del state[symbol]
         else:
-            arm_threshold = _activation_pct_at(now)
+            arm_threshold = _arm_threshold_pct(direction, avg_price, qty)
             if move >= arm_threshold:
                 st["trailing"] = True
                 st["peak_price"] = ltp

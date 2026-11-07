@@ -60,9 +60,11 @@ rather than MIS -- MIS buys sometimes get blocked by the broker, and MTF
 lets the position carry overnight if it moves against them -- but SELL-side
 (short) intraday trades stay MIS and are handled entirely by
 intraday_live.py already. So a position whose entry_date is TODAY arms/
-trails using the SAME thresholds as the intraday guardian (time-of-day arm
-%, see _same_day_arm_threshold_pct, and GRID_PCT/2 trail) instead of
-waiting for swing's wider breakeven-adjusted 2%+ target. Only once a
+trails using the SAME thresholds as the intraday guardian (breakeven% +
+INTRADAY_ARM_MARGIN_PCT, see _same_day_arm_threshold_pct -- updated
+2026-11-08 to match intraday_live.py's own breakeven-cost switch, and
+GRID_PCT/2 trail) instead of waiting for swing's wider breakeven-adjusted
+2%+ target. Only once a
 position survives to a SECOND day (the trader chose to carry it, exactly
 like converting an intraday trade into a swing trade) does it switch over
 to the breakeven-adjusted swing rules below -- entry_date is the only
@@ -77,12 +79,8 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from . import alerts, auth, config, heartbeat, orders
-from .strategy import (
-    GRID_PCT,
-    TRAILING_ACTIVATION_CUTOVER_TIME,
-    TRAILING_ACTIVATION_PCT,
-    TRAILING_ACTIVATION_PCT_AFTER_NOON,
-)
+from .intraday_live import INTRADAY_ARM_MARGIN_PCT
+from .strategy import GRID_PCT, compute_intraday_breakeven_pct
 from .swing_strategy import PROFIT_TARGET_PCT, TRAILING_PCT, compute_mtf_breakeven_pct
 
 # Same percentages the intraday guardian uses -- kept in sync by importing the
@@ -398,14 +396,13 @@ def _is_same_day_entry(st: dict, today: date) -> bool:
     return date.fromisoformat(st["entry_date"]) == today
 
 
-def _same_day_arm_threshold_pct(now: datetime) -> float:
-    """Identical rule to intraday_live._activation_pct_at: tighter after
-    11 AM since less of the day remains. Kept as a local copy (not an
-    import of that function) because it takes a plain datetime here, not
-    the intraday module's own _now() -- same constants, same values."""
-    if now.time() >= TRAILING_ACTIVATION_CUTOVER_TIME:
-        return TRAILING_ACTIVATION_PCT_AFTER_NOON
-    return TRAILING_ACTIVATION_PCT
+def _same_day_arm_threshold_pct(position_value: float) -> float:
+    """Identical rule to intraday_live._arm_threshold_pct: breakeven% (this
+    trade's real intraday round-trip cost) + INTRADAY_ARM_MARGIN_PCT. MTF is
+    long-only, so direction is always "long" here. Imports the same
+    function/constant intraday_live.py uses rather than keeping a second
+    copy, so the two guardians can never silently drift apart."""
+    return compute_intraday_breakeven_pct("long", position_value) + INTRADAY_ARM_MARGIN_PCT
 
 
 def _arm_threshold_pct(kite, symbol: str, pos: dict, st: dict, today: date, logger: SwingLogger) -> float:
@@ -422,7 +419,8 @@ def _arm_threshold_pct(kite, symbol: str, pos: dict, st: dict, today: date, logg
     "SAME-DAY MTF ENTRIES ARE TREATED LIKE INTRADAY". This check is first
     and needs no funded_amount at all, since it doesn't use breakeven."""
     if _is_same_day_entry(st, today):
-        return _same_day_arm_threshold_pct(_now())
+        position_value = pos["quantity"] * pos["average_price"]
+        return _same_day_arm_threshold_pct(position_value)
     if st["funded_amount"] is None:
         return PROFIT_TARGET_PCT
     entry_date = date.fromisoformat(st["entry_date"])

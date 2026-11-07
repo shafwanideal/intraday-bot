@@ -210,6 +210,32 @@ def position_cost(direction: str, legs: list[tuple[float, float]], exit_price: f
     return total
 
 
+# 2026-11-08, explicit request: the intraday (MIS) guardian's trailing-arm threshold
+# wasn't accounting for real round-trip cost at all -- it was a flat % of avg_price
+# (TRAILING_ACTIVATION_PCT/_AFTER_NOON above), unlike the swing/MTF guardian, which
+# already arms at a real breakeven%-derived threshold (see swing_strategy.py's
+# compute_mtf_breakeven_pct). This is the same idea for intraday: solve the real
+# MIS round-trip cost as a % of position value, using order_cost above (no MTF
+# interest/pledge charges here -- a same-day MIS position carries neither).
+BREAKEVEN_SOLVE_ITERATIONS = 5  # fixed-point iteration (exit-side cost depends weakly on exit value)
+
+
+def compute_intraday_breakeven_pct(direction: str, position_value: float) -> float:
+    """Solves x (fraction of position_value) such that this MIS trade's real
+    round-trip cost equals x * position_value. Same fixed-point technique as
+    swing_strategy.compute_mtf_breakeven_pct, minus the MTF-only interest/
+    pledge terms."""
+    entry_side = "buy" if direction == "long" else "sell"
+    exit_side = "sell" if direction == "long" else "buy"
+    entry_cost = order_cost(position_value, entry_side)
+    x = 0.0
+    for _ in range(BREAKEVEN_SOLVE_ITERATIONS):
+        exit_value = position_value * (1 + x)
+        exit_cost = order_cost(exit_value, exit_side)
+        x = (entry_cost + exit_cost) / position_value
+    return x
+
+
 @dataclass
 class Position:
     symbol: str
