@@ -148,6 +148,33 @@ MISSING_POLLS_BEFORE_DROP = 3
 # position (see state["notified_big_move"]), not on every poll past the threshold.
 BIG_MOVE_PCT = 0.03
 
+# Crash stop-loss, requested 2026-11-07: ANY MTF holding in a stock OUTSIDE Nifty 50
+# that falls more than this much TODAY (vs yesterday's close, not vs your average
+# price -- a position up 20% overall can still be crashing today) gets sold
+# immediately, regardless of trailing/arm state, with an alarming Telegram alert.
+# Deliberately excludes Nifty 50 names: the trader's ask was specifically for
+# smaller/more volatile non-index stocks, which can gap far more violently in a
+# single session than a large, liquid index constituent.
+CRASH_STOP_LOSS_PCT = 0.08
+
+# Best-effort list, captured 2026-11-07 from training knowledge -- NSE rebalances
+# Nifty 50 twice a year (March/September), and at least one rebalance has likely
+# happened since this knowledge was current, so this WILL be somewhat stale.
+# Verify against NSE's official index page and correct this set: WRONGLY
+# INCLUDING a symbol here is the dangerous direction (a real non-Nifty50 stock
+# would then skip this crash check entirely); wrongly EXCLUDING one only means
+# an index stock gets this protection too, which is harmless.
+NIFTY_50_SYMBOLS = {
+    "RELIANCE", "TCS", "HDFCBANK", "ICICIBANK", "INFY", "BHARTIARTL", "ITC", "SBIN",
+    "HINDUNILVR", "LT", "BAJFINANCE", "KOTAKBANK", "AXISBANK", "ASIANPAINT", "MARUTI",
+    "SUNPHARMA", "TITAN", "ULTRACEMCO", "NESTLEIND", "WIPRO", "M&M", "NTPC",
+    "POWERGRID", "ONGC", "TATAMOTORS", "TATASTEEL", "ADANIENT", "ADANIPORTS",
+    "JSWSTEEL", "COALINDIA", "BAJAJFINSV", "HCLTECH", "TECHM", "INDUSINDBK",
+    "DRREDDY", "CIPLA", "DIVISLAB", "EICHERMOT", "GRASIM", "HEROMOTOCO",
+    "BRITANNIA", "BPCL", "SBILIFE", "HDFCLIFE", "APOLLOHOSP", "TATACONSUM",
+    "BAJAJ-AUTO", "SHRIRAMFIN", "LTIM", "HINDALCO", "TRENT",
+}
+
 
 def _now() -> datetime:
     return datetime.now(IST)
@@ -160,6 +187,7 @@ class SwingLogger:
         "swing_position_detected",
         "swing_trailing_armed",
         "swing_exit",
+        "swing_crash_stop_loss_exit",
         "swing_position_closed_externally",
         "swing_funded_amount_unavailable",
         "swing_big_move",
@@ -304,7 +332,12 @@ def _fetch_mtf_positions(kite) -> dict[str, dict] | None:
     return held
 
 
-def _fetch_ltp(kite, symbols: list[str]) -> dict[str, float]:
+def _fetch_quotes(kite, symbols: list[str]) -> dict[str, dict]:
+    """{symbol: {"ltp": float, "prev_close": float|None}} -- prev_close (Kite's
+    own ohlc.close, yesterday's settle price) is what the crash stop-loss needs
+    to measure TODAY's move, as opposed to avg_price which measures the move
+    since entry. Missing/malformed ohlc just means prev_close is None for that
+    symbol; callers must treat that as "can't check today's move", not zero."""
     if not symbols:
         return {}
     try:
@@ -316,7 +349,8 @@ def _fetch_ltp(kite, symbols: list[str]) -> dict[str, float]:
     for symbol in symbols:
         q = quotes.get(f"NSE:{symbol}")
         if q and q.get("last_price") is not None:
-            result[symbol] = float(q["last_price"])
+            prev_close = (q.get("ohlc") or {}).get("close")
+            result[symbol] = {"ltp": float(q["last_price"]), "prev_close": float(prev_close) if prev_close else None}
     return result
 
 
@@ -509,12 +543,13 @@ def check_once(kite, state: dict[str, dict], logger: SwingLogger) -> None:
     if not positions:
         return
 
-    ltps = _fetch_ltp(kite, list(positions.keys()))
+    quotes = _fetch_quotes(kite, list(positions.keys()))
 
     for symbol, pos in positions.items():
-        ltp = ltps.get(symbol)
-        if ltp is None:
+        quote = quotes.get(symbol)
+        if quote is None:
             continue
+        ltp = quote["ltp"]
         avg_price = pos["average_price"]
         st = state[symbol]
 
@@ -524,6 +559,53 @@ def check_once(kite, state: dict[str, dict], logger: SwingLogger) -> None:
             logger.event(
                 "swing_big_move", symbol=symbol, avg_price=avg_price, ltp=ltp, move_pct=round(move_pct_signed * 100, 2)
             )
+
+        # Crash stop-loss -- non-Nifty50 names only, checked UNCONDITIONALLY (armed or
+        # not) against TODAY's move from yesterday's close, independent of avg_price/P&L.
+        # See CRASH_STOP_LOSS_PCT's own comment for why.
+        prev_close = quote["prev_close"]
+        if symbol not in NIFTY_50_SYMBOLS and prev_close:
+            day_move = (ltp - prev_close) / prev_close
+            if day_move <= -CRASH_STOP_LOSS_PCT:
+                qty = positions[symbol]["quantity"]  # re-read fresh, never cached
+                try:
+                    order_id = orders.place_mtf_order(kite, symbol, "SELL", qty, ltp, tag="swing_crash_sl")
+                except orders.OrderRejected as exc:
+                    logger.critical(
+                        f"{symbol} CRASH stop-loss SELL was REJECTED by Kite -- down "
+                        f"{abs(day_move) * 100:.2f}% today, position likely still open: {exc}",
+                        symbol=symbol,
+                    )
+                    continue
+                except orders.OrderPlacementAmbiguous as exc:
+                    logger.critical(f"{symbol} CRASH stop-loss SELL placement is in an UNKNOWN state -- {exc}", symbol=symbol)
+                    continue
+
+                fill = orders.wait_for_fill(kite, order_id)
+                if fill["status"] != "COMPLETE":
+                    logger.critical(
+                        f"{symbol} CRASH stop-loss SELL did not confirm filled -- down {abs(day_move) * 100:.2f}% "
+                        "today, real position may still be open. Check Kite directly.",
+                        symbol=symbol,
+                        fill_result=fill,
+                    )
+                    continue
+
+                fill_price = fill["average_price"] or ltp
+                filled_qty = fill["filled_quantity"] or qty
+                gross_pnl = (fill_price - avg_price) * filled_qty
+                logger.event(
+                    "swing_crash_stop_loss_exit",
+                    symbol=symbol,
+                    qty=filled_qty,
+                    price=fill_price,
+                    avg_price=avg_price,
+                    prev_close=prev_close,
+                    day_move_pct=round(day_move * 100, 2),
+                    gross_pnl=round(gross_pnl, 2),
+                )
+                del state[symbol]
+                continue
 
         if st["trailing"]:
             st["peak_price"] = max(st["peak_price"], ltp)

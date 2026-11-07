@@ -22,6 +22,14 @@ def format_event(kind: str, fields: dict, label: str = "") -> str:
             return (f"📈 {tag}Trailing stop STARTED — {sym}\n"
                     f"Armed at {_money(fields['armed_at'])} ({float(fields['arm_pct']):.2f}% in profit vs avg {_money(fields['avg_price'])}). "
                     f"The stop now follows the peak.")
+        if kind.endswith("_crash_stop_loss_exit"):
+            qty, price, avg = fields.get("qty"), fields.get("price"), fields.get("avg_price")
+            day_move = float(fields.get("day_move_pct", 0))
+            pnl = fields.get("gross_pnl")
+            pnl_str = f", gross P&L {_money(pnl)} before charges" if pnl is not None else ""
+            return (f"🚨🚨 {tag}CRASH STOP-LOSS — {sym} SOLD 🚨🚨\n"
+                    f"Down {abs(day_move):.2f}% TODAY (prev close {_money(fields.get('prev_close'))} → {_money(price)}).\n"
+                    f"{qty} @ {_money(price)} (avg {_money(avg)}){pnl_str}")
         if kind.endswith("_exit") or kind.endswith("_square_off"):
             direction = fields.get("direction", "long")
             qty, price, avg = fields.get("qty"), fields.get("price"), fields.get("avg_price")

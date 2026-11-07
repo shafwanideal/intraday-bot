@@ -231,7 +231,9 @@ def _sold_today_section(today_str: str) -> tuple[str, float]:
     """Returns (formatted lines, total gross P&L across every sell today) --
     the total is needed by build_eod_table for the grand-total summary line."""
     records = _todays_log_records("swing_*.jsonl", today_str) + _todays_log_records("intraday_manual_*.jsonl", today_str)
-    sells = [r for r in records if r.get("kind") in ("swing_exit", "intraday_exit", "intraday_stop_loss_exit", "intraday_square_off")]
+    sells = [r for r in records if r.get("kind") in (
+        "swing_exit", "swing_crash_stop_loss_exit", "intraday_exit", "intraday_stop_loss_exit", "intraday_square_off"
+    )]
     if not sells:
         return "No sells today.", 0.0
     sells.sort(key=lambda r: r.get("timestamp", ""))
@@ -244,9 +246,9 @@ def _sold_today_section(today_str: str) -> tuple[str, float]:
         price = r.get("price")
         avg = r.get("avg_price")
         ts = r.get("timestamp", "")[11:16] or "--:--"
-        if r["kind"] == "swing_exit":
+        if r["kind"] in ("swing_exit", "swing_crash_stop_loss_exit"):
             product = "MTF"
-            reason = "trailing stop"
+            reason = "CRASH STOP-LOSS" if r["kind"] == "swing_crash_stop_loss_exit" else "trailing stop"
             pnl = r.get("gross_pnl")
             pnl_label = "gross"
         else:
