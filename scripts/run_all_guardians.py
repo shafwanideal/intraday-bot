@@ -24,6 +24,7 @@ from src.digest import run_digest_loop  # noqa: E402
 from src.hourly_pnl import run_hourly_pnl_loop  # noqa: E402
 from src.intraday_live import POLL_INTERVAL_SECONDS as INTRADAY_POLL_INTERVAL_SECONDS  # noqa: E402
 from src.intraday_live import run_intraday_guardian  # noqa: E402
+from src.nifty_scanner import run_nifty_scanner_loop  # noqa: E402
 from src.swing_live import POLL_INTERVAL_SECONDS as SWING_POLL_INTERVAL_SECONDS  # noqa: E402
 from src.swing_live import run_swing_guardian  # noqa: E402
 
@@ -72,22 +73,30 @@ def main() -> None:
         daemon=True,
     )
 
+    nifty_scanner_thread = threading.Thread(
+        target=run_nifty_scanner_loop,
+        kwargs={"get_kite": auth.get_kite, "notifier": notifier},
+        name="nifty-scanner",
+        daemon=True,
+    )
+
     swing_thread.start()
     intraday_thread.start()
     digest_thread.start()
     hourly_pnl_thread.start()
+    nifty_scanner_thread.start()
 
-    print("Both guardians (and the digest, and the hourly P&L update) are running. Ctrl+C stops all.", flush=True)
+    print("Both guardians (and the digest, hourly P&L update, and Nifty50 scanner) are running. Ctrl+C stops all.",
+          flush=True)
     try:
         # Plain .join() would block the main thread uninterruptibly on POSIX
         # once both targets are daemon threads sleeping in time.sleep(); a
         # timeout loop keeps the main thread waking up regularly so Ctrl+C
         # (SIGINT) actually gets delivered and handled promptly.
-        while swing_thread.is_alive() or intraday_thread.is_alive() or digest_thread.is_alive() or hourly_pnl_thread.is_alive():
-            swing_thread.join(timeout=1)
-            intraday_thread.join(timeout=1)
-            digest_thread.join(timeout=1)
-            hourly_pnl_thread.join(timeout=1)
+        all_threads = (swing_thread, intraday_thread, digest_thread, hourly_pnl_thread, nifty_scanner_thread)
+        while any(t.is_alive() for t in all_threads):
+            for t in all_threads:
+                t.join(timeout=1)
     except KeyboardInterrupt:
         print("\nStopping -- each guardian finishes its current poll, then this process exits.")
 
