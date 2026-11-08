@@ -45,8 +45,13 @@ from datetime import datetime, time, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+import warnings
+
 import numpy as np
 import pandas as pd
+
+warnings.simplefilter("ignore", FutureWarning)
+warnings.simplefilter("ignore", DeprecationWarning)
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -226,7 +231,7 @@ def intraday_signals(bars: pd.DataFrame) -> pd.DataFrame:
 def run_symbol(symbol, bars, daily, start, end, capital, arm_extra, trail, stop, use_daily_gate):
     df = intraday_signals(bars)
     gate = daily_gate(daily)
-    gate_prev = gate.shift(1).fillna(False) if not gate.empty else gate  # D-1 close decides day D
+    gate_prev = gate.shift(1).astype("boolean").fillna(False).astype(bool) if not gate.empty else gate  # D-1 close decides day D
 
     trades = []
     for day, chunk in df.groupby(df.index.normalize()):
@@ -356,13 +361,13 @@ def main() -> None:
     tokens = _tokens(kite)
 
     end = pd.Timestamp.now(tz=IST).normalize()
-    start = end - pd.Timedelta(days=int(args.years * 365))
+    start = end - pd.Timedelta(int(args.years * 365), unit="D")
 
     all_trades: list[dict] = []
     for n, sym in enumerate(symbols, 1):
         bars, daily = fetch_symbol(kite, tokens, sym, args.days)
         if bars.empty:
-            print(f"[{n}/{len(symbols)}] {sym}: no bars")
+            print(f"[{n}/{len(symbols)}] {sym}: no bars", flush=True)
             continue
         trades = run_symbol(
             sym, bars, daily, start, end, args.capital,
@@ -370,7 +375,7 @@ def main() -> None:
             not args.no_daily_gate,
         )
         all_trades.extend(trades)
-        print(f"[{n}/{len(symbols)}] {sym}: {len(bars):>6} bars, {len(trades):>3} trades")
+        print(f"[{n}/{len(symbols)}] {sym}: {len(bars):>6} bars, {len(trades):>3} trades", flush=True)
 
     label = (f"INTRADAY scan  arm=breakeven+{args.arm}%  trail={args.trail}%  "
              f"stop={args.stop or 'none'}  daily-gate={'off' if args.no_daily_gate else 'on'}  "
