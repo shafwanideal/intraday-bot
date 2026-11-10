@@ -146,22 +146,30 @@ MISSING_POLLS_BEFORE_DROP = 3
 # position (see state["notified_big_move"]), not on every poll past the threshold.
 BIG_MOVE_PCT = 0.03
 
-# Crash stop-loss, requested 2026-11-07: ANY MTF holding in a stock OUTSIDE Nifty 50
-# that falls more than this much TODAY (vs yesterday's close, not vs your average
-# price -- a position up 20% overall can still be crashing today) gets sold
-# immediately, regardless of trailing/arm state, with an alarming Telegram alert.
-# Deliberately excludes Nifty 50 names: the trader's ask was specifically for
-# smaller/more volatile non-index stocks, which can gap far more violently in a
-# single session than a large, liquid index constituent.
+# Crash stop-loss, requested 2026-11-07: ANY MTF holding that falls more than this
+# much TODAY (vs yesterday's close, not vs your average price -- a position up 20%
+# overall can still be crashing today) gets sold immediately, regardless of
+# trailing/arm state, with an alarming Telegram alert. Originally excluded Nifty 50
+# names entirely (smaller/more volatile non-index stocks can gap far more violently
+# in a single session). Extended 2026-11-10, explicit instruction: Nifty 50 names
+# now get their OWN, tighter threshold instead of no crash check at all -- a -5%
+# day-move in a large, liquid index constituent is already unusual, so it doesn't
+# need to wait for -8% the way a smaller stock's normal volatility does.
 CRASH_STOP_LOSS_PCT = 0.08
+NIFTY50_CRASH_STOP_LOSS_PCT = 0.05
 
 # Best-effort list, captured 2026-11-07 from training knowledge -- NSE rebalances
 # Nifty 50 twice a year (March/September), and at least one rebalance has likely
 # happened since this knowledge was current, so this WILL be somewhat stale.
-# Verify against NSE's official index page and correct this set: WRONGLY
-# INCLUDING a symbol here is the dangerous direction (a real non-Nifty50 stock
-# would then skip this crash check entirely); wrongly EXCLUDING one only means
-# an index stock gets this protection too, which is harmless.
+# Verify against NSE's official index page and correct this set.
+#
+# Since the crash stop-loss now fires for every symbol either way (just at a
+# different threshold -- see CRASH_STOP_LOSS_PCT / NIFTY50_CRASH_STOP_LOSS_PCT),
+# the risk direction flipped from the original exclude-only design: wrongly
+# EXCLUDING a real Nifty50 stock from this set is now the under-protective
+# direction (it gets the looser 8% instead of its intended 5%); wrongly
+# INCLUDING a non-Nifty50 stock only means it gets the tighter 5% instead of
+# 8% -- more cautious than intended, not a safety gap.
 NIFTY_50_SYMBOLS = {
     "RELIANCE", "TCS", "HDFCBANK", "ICICIBANK", "INFY", "BHARTIARTL", "ITC", "SBIN",
     "HINDUNILVR", "LT", "BAJFINANCE", "KOTAKBANK", "AXISBANK", "ASIANPAINT", "MARUTI",
@@ -558,13 +566,15 @@ def check_once(kite, state: dict[str, dict], logger: SwingLogger) -> None:
                 "swing_big_move", symbol=symbol, avg_price=avg_price, ltp=ltp, move_pct=round(move_pct_signed * 100, 2)
             )
 
-        # Crash stop-loss -- non-Nifty50 names only, checked UNCONDITIONALLY (armed or
-        # not) against TODAY's move from yesterday's close, independent of avg_price/P&L.
-        # See CRASH_STOP_LOSS_PCT's own comment for why.
+        # Crash stop-loss -- every MTF holding, checked UNCONDITIONALLY (armed or not)
+        # against TODAY's move from yesterday's close, independent of avg_price/P&L.
+        # Nifty50 names use their own tighter threshold -- see CRASH_STOP_LOSS_PCT /
+        # NIFTY50_CRASH_STOP_LOSS_PCT's own comments for why.
         prev_close = quote["prev_close"]
-        if symbol not in NIFTY_50_SYMBOLS and prev_close:
+        if prev_close:
+            threshold = NIFTY50_CRASH_STOP_LOSS_PCT if symbol in NIFTY_50_SYMBOLS else CRASH_STOP_LOSS_PCT
             day_move = (ltp - prev_close) / prev_close
-            if day_move <= -CRASH_STOP_LOSS_PCT:
+            if day_move <= -threshold:
                 qty = positions[symbol]["quantity"]  # re-read fresh, never cached
                 try:
                     order_id = orders.place_mtf_order(kite, symbol, "SELL", qty, ltp, tag="swing_crash_sl")
