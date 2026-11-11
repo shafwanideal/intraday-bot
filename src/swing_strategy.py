@@ -155,9 +155,14 @@ class SwingPosition:
         return self.legs[-1][0]
 
 
-TRAILING_PCT = 0.01  # requested 2026-09-02: once armed at PROFIT_TARGET_PCT, trail the peak
-# instead of closing immediately. No distance was specified, so this defaults to half the
-# 2% activation threshold -- same convention already used by the intraday strategy
+TRAILING_PCT = 0.005  # tightened from 1% on 2026-11-11, per explicit instruction and a
+# backtest across the trader's 8 real MTF holdings (~2.25yr of daily bars, scripts/
+# atr_trail_backtest.py): 0.5% beat 1% on EVERY symbol, same win rate (98.8%) and same
+# whipsaw count (16), ~Rs32k more total P&L just from exiting a touch sooner on winners.
+# Also beat both ATR-tiered alternatives tested the same day -- see that script's
+# docstring. Originally 1%, requested 2026-09-02: once armed at PROFIT_TARGET_PCT, trail
+# the peak instead of closing immediately -- that value defaulted to half the 2%
+# activation threshold, same convention the intraday strategy used
 # (trail_pct defaults to grid_pct / 2 there too).
 
 
