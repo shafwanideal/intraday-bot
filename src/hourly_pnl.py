@@ -7,6 +7,13 @@ and which stocks were sold, INCLUDING trades the trader books manually
 (partial profit-taking, a manual stop-loss) outside the guardians' own
 trailing-stop exits -- not just bot-triggered ones.
 
+Extended 2026-11-11, explicit request: every hourly update now ALSO lists
+every open position's trailing status -- armed or not, and if armed, the
+GUARANTEED-MINIMUM profit (rupees and %) alongside the CURRENT profit at
+live LTP. Since that status is useful even on a quiet hour with nothing
+sold, this report now fires every REPORT_HOURS hour unconditionally
+(previously it stayed silent on a quiet hour).
+
 Why this needs its own FIFO matching rather than reusing swing_exit/
 intraday_exit log events: those events only exist for exits the GUARDIANS
 themselves placed. A manual sell/cover via the Kite app or website never
@@ -43,8 +50,8 @@ from datetime import date, datetime, time
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from . import orders
-from .swing_live import MTF_COST_BASIS_FILE
+from . import intraday_live, orders
+from .swing_live import MTF_COST_BASIS_FILE, SWING_STATE_FILE
 
 IST = ZoneInfo("Asia/Kolkata")
 LOG_DIR = Path(__file__).resolve().parent.parent / "logs"
@@ -80,6 +87,102 @@ def _load_mtf_cost_basis_cache() -> dict[str, dict]:
         return json.loads(MTF_COST_BASIS_FILE.read_text())
     except (OSError, json.JSONDecodeError):
         return {}
+
+
+def _load_swing_state() -> dict:
+    """Independent copy of digest.py's own helper -- kept separate rather
+    than cross-importing between two notification modules, same convention
+    already used for _fifo_realized below."""
+    try:
+        with open(SWING_STATE_FILE) as f:
+            return json.load(f)
+    except Exception:  # noqa: BLE001 - missing/mid-write/malformed -> no extra info available
+        return {}
+
+
+def _safe_quote(kite, symbols: list[str]) -> dict:
+    if not symbols:
+        return {}
+    try:
+        return kite.quote([f"NSE:{s}" for s in symbols])
+    except orders.PLACEMENT_EXCEPTIONS:
+        return {}
+
+
+def _pct(profit: float, avg: float, qty: float) -> float:
+    return profit / (avg * qty) * 100 if avg and qty else 0.0
+
+
+def _open_positions_section(kite) -> str:
+    """Added 2026-11-11, explicit request: for every open MTF/MIS position,
+    show whether trailing has armed and, if so, the GUARANTEED-MINIMUM
+    profit (at the locked floor/lock price -- can only ever improve from
+    here, never worsen) alongside the CURRENT profit at live LTP, both in
+    rupees and %. Lets the trader see this from the hourly Telegram update
+    alone, without SSHing in to read a state file by hand."""
+    lines = []
+
+    try:
+        net = kite.positions().get("net", [])
+    except orders.PLACEMENT_EXCEPTIONS as exc:
+        lines.append(f"  (couldn't fetch swing positions: {exc!r})")
+        net = []
+    mtf = [p for p in net if p.get("product") == orders.PRODUCT_MTF and p.get("quantity", 0) > 0]
+    if mtf:
+        swing_state = _load_swing_state()
+        quotes = _safe_quote(kite, [p["tradingsymbol"] for p in mtf])
+        for p in mtf:
+            sym, qty, avg = p["tradingsymbol"], p["quantity"], p["average_price"]
+            ltp = (quotes.get(f"NSE:{sym}") or {}).get("last_price")
+            if ltp is None:
+                lines.append(f"  {sym} (MTF): quote unavailable")
+                continue
+            cur_pnl = (ltp - avg) * qty
+            cur_pct = _pct(cur_pnl, avg, qty)
+            st = swing_state.get(sym)
+            if st and st.get("trailing") and st.get("floor_price"):
+                min_pnl = (st["floor_price"] - avg) * qty
+                min_pct = _pct(min_pnl, avg, qty)
+                lines.append(
+                    f"  \U0001f7e2 {sym} (MTF): TRAILING ON -- min guaranteed {_signed_rupees(min_pnl)} ({min_pct:+.2f}%), "
+                    f"current {_signed_rupees(cur_pnl)} ({cur_pct:+.2f}%)"
+                )
+            else:
+                lines.append(f"  ⚪ {sym} (MTF): not yet armed -- current {_signed_rupees(cur_pnl)} ({cur_pct:+.2f}%)")
+
+    try:
+        day = kite.positions().get("day", [])
+    except orders.PLACEMENT_EXCEPTIONS as exc:
+        lines.append(f"  (couldn't fetch intraday positions: {exc!r})")
+        day = []
+    mis = [p for p in day if p.get("product") == "MIS" and p.get("quantity", 0) != 0]
+    if mis:
+        intraday_state = intraday_live.load_state()
+        quotes = _safe_quote(kite, [p["tradingsymbol"] for p in mis])
+        for p in mis:
+            sym, raw_qty, avg = p["tradingsymbol"], p["quantity"], p["average_price"]
+            direction = "long" if raw_qty > 0 else "short"
+            qty = abs(raw_qty)
+            ltp = (quotes.get(f"NSE:{sym}") or {}).get("last_price")
+            if ltp is None:
+                lines.append(f"  {sym} (MIS): quote unavailable")
+                continue
+            cur_pnl = (ltp - avg) * qty if direction == "long" else (avg - ltp) * qty
+            cur_pct = _pct(cur_pnl, avg, qty)
+            st = intraday_state.get(sym)
+            if st and st.get("trailing") and st.get("armed_activation_pct") is not None:
+                act = st["armed_activation_pct"]
+                min_pnl = act * avg * qty
+                lines.append(
+                    f"  \U0001f7e2 {sym} (MIS): TRAILING ON -- min guaranteed {_signed_rupees(min_pnl)} ({act * 100:+.2f}%), "
+                    f"current {_signed_rupees(cur_pnl)} ({cur_pct:+.2f}%)"
+                )
+            else:
+                lines.append(f"  ⚪ {sym} (MIS): not yet armed -- current {_signed_rupees(cur_pnl)} ({cur_pct:+.2f}%)")
+
+    if not lines:
+        return "  No open positions right now."
+    return "\n".join(lines)
 
 
 def _fifo_realized(orders_today: list[dict], seed: tuple[float, int] | None) -> tuple[float, int]:
@@ -122,8 +225,11 @@ def _fifo_realized(orders_today: list[dict], seed: tuple[float, int] | None) -> 
 def build_hourly_report(kite) -> str | None:
     """Everything realized (closed) so far TODAY, recomputed fresh each call
     -- cumulative for the whole day, not just since the last report, so each
-    hour's message stands alone. Returns None if nothing has closed yet (no
-    message sent that hour)."""
+    hour's message stands alone. Also carries every open position's
+    trailing status (see _open_positions_section) -- added 2026-11-11,
+    explicit request. Returns None only on an actual orders-fetch failure;
+    unlike before, a quiet hour with nothing sold still sends a message now,
+    since the open-position status is useful every hour regardless."""
     try:
         all_orders = kite.orders()
     except orders.PLACEMENT_EXCEPTIONS as exc:
@@ -158,20 +264,23 @@ def build_hourly_report(kite) -> str | None:
         total += realized
         rows.append((symbol, product, closed_qty, realized))
 
-    if not rows:
-        return None
-
     now_str = datetime.now(IST).strftime("%H:%M")
     lines = [
         f"Hourly P&L update ({now_str} IST)",
         "",
-        f"Today's realized P&L so far: {_signed_rupees(total)}",
+        "Open positions:",
+        _open_positions_section(kite),
         "",
-        "Sold today (includes trades booked manually, not just bot exits):",
     ]
-    for symbol, product, qty, pnl in sorted(rows, key=lambda r: -r[3]):
-        emoji = "✅" if pnl >= 0 else "\U0001F53B"  # checkmark / red triangle down
-        lines.append(f"{emoji} {symbol} ({product}) qty {qty}: {_signed_rupees(pnl)}")
+    if rows:
+        lines.append(f"Today's realized P&L so far: {_signed_rupees(total)}")
+        lines.append("")
+        lines.append("Sold today (includes trades booked manually, not just bot exits):")
+        for symbol, product, qty, pnl in sorted(rows, key=lambda r: -r[3]):
+            emoji = "✅" if pnl >= 0 else "\U0001F53B"  # checkmark / red triangle down
+            lines.append(f"{emoji} {symbol} ({product}) qty {qty}: {_signed_rupees(pnl)}")
+    else:
+        lines.append("Nothing sold yet today.")
 
     return "\n".join(lines)
 
@@ -201,7 +310,7 @@ def run_hourly_pnl_loop(get_kite, notifier, should_stop=None, poll_interval: int
                 _log(f"failed to build hourly report: {exc!r}")
                 message = None
             if message is None:
-                _log(f"{now.hour}:00 report: nothing sold yet today -- no message sent")
+                _log(f"{now.hour}:00 report: could not build (fetch failed) -- no message sent")
             elif notifier is None:
                 _log(f"{now.hour}:00 report built but no notifier configured -- not sent")
             else:
