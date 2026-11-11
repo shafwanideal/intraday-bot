@@ -52,6 +52,7 @@ HISTORY_DAYS = 850
 
 CONFIGS = {
     "baseline (flat 1%)": {"trailing_pct": 0.01},
+    "flat 0.5%": {"trailing_pct": 0.005},
     "set_a (2x/1.5x/1x ATR)": {"atr_tiers": [(0.05, 2.0), (0.10, 1.5), (float("inf"), 1.0)]},
     "set_b (2.5x/1.75x/1.25x ATR)": {"atr_tiers": [(0.05, 2.5), (0.10, 1.75), (float("inf"), 1.25)]},
 }
