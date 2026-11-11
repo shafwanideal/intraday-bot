@@ -139,6 +139,7 @@ class SwingPosition:
     entry_qty: int = 0  # fixed share count reused for every averaging leg
     trailing: bool = False  # armed once price first hits PROFIT_TARGET_PCT above avg_price
     peak_price: float | None = None  # best close seen since trailing armed
+    floor_price: float | None = None  # locked at arm time; the stop can never fall below this
     atr: float | None = None  # this symbol's ATR at entry, if using ATR-based trailing
 
     @property
@@ -178,6 +179,7 @@ class SwingEngine:
         profit_target_pct: float = PROFIT_TARGET_PCT,
         trailing_pct: float = TRAILING_PCT,
         atr_multiplier: float | None = None,
+        atr_tiers: list[tuple[float, float]] | None = None,
         apply_costs: bool = True,
         max_total_capital: float | None = None,
         stop_fill_at_level: bool = False,
@@ -192,6 +194,10 @@ class SwingEngine:
         # intraday GridEngine's atr_multiplier. Symbols entered without an atr value
         # fall back to the percentage-based trail even when this is set.
         self.atr_multiplier = atr_multiplier
+        # Tiered ATR multiplier: list of (profit_pct_upper_bound, multiplier), ascending,
+        # last entry's bound should be float('inf'). Profit is measured since avg_price
+        # (entry), not since breakeven. Takes priority over a flat atr_multiplier when set.
+        self.atr_tiers = atr_tiers
         self.apply_costs = apply_costs
         # Hard ceiling on TOTAL capital committed across every open position's every leg,
         # combined -- added 2026-09-02 after backtests showed peak concurrent capital
@@ -290,10 +296,20 @@ class SwingEngine:
 
         if pos.trailing:
             pos.peak_price = max(pos.peak_price, price)
-            use_atr = self.atr_multiplier is not None and pos.atr is not None
-            stop_level = (
-                pos.peak_price - self.atr_multiplier * pos.atr if use_atr else pos.peak_price * (1 - self.trailing_pct)
-            )
+            use_atr = (self.atr_multiplier is not None or self.atr_tiers is not None) and pos.atr is not None
+            if use_atr:
+                if self.atr_tiers is not None:
+                    profit_pct = (price - pos.avg_price) / pos.avg_price
+                    multiplier = next(mult for upper, mult in self.atr_tiers if profit_pct < upper)
+                else:
+                    multiplier = self.atr_multiplier
+                raw_stop = pos.peak_price - multiplier * pos.atr
+            else:
+                raw_stop = pos.peak_price * (1 - self.trailing_pct)
+            # Floor-lock: once armed, the stop can only ever rise, never retreat below
+            # the price that triggered arming -- matches swing_live.py's live floor_price
+            # behavior exactly, for BOTH pct and ATR trailing modes.
+            stop_level = max(pos.floor_price, raw_stop)
             if self.stop_fill_at_level and low is not None and low <= stop_level:
                 # Gap-down below the stop: a resting order fills at the open, not at a
                 # level the stock never traded at after the bell.
@@ -318,6 +334,7 @@ class SwingEngine:
         if price >= pos.avg_price * (1 + self.profit_target_pct):
             pos.trailing = True
             pos.peak_price = price
+            pos.floor_price = price
             return None
 
         if price <= pos.last_leg_price * (1 - self.averaging_drop_pct):
