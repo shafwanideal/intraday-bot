@@ -115,6 +115,20 @@ LOG_DIR = PROJECT_ROOT / "logs"
 # moment once a day.
 MTF_COST_BASIS_FILE = PROJECT_ROOT / "logs" / "mtf_cost_basis.json"
 
+# Manual "do not sell this today" override, added 2026-11-12 per explicit
+# urgent instruction. {"date": "YYYY-MM-DD", "symbols": [...]}. Keyed by
+# date so it self-expires -- it only suppresses a sell when the file's own
+# date matches TODAY, never silently carries into tomorrow. Suppresses the
+# actual SELL order only (both the crash stop-loss and the trailing-stop
+# exit) -- trailing/peak tracking keeps running normally underneath, so if
+# the override is lifted later the same day, the stop level is still
+# accurate rather than frozen. The trader sets this by hand:
+#   echo '{"date": "YYYY-MM-DD", "symbols": ["SYMBOL"]}' > logs/do_not_sell_today.json
+# Deliberately a flat file, not a Telegram command -- this bot never reads
+# inbound Telegram messages, and adding that surface for one override
+# wasn't worth the risk versus one shell command.
+DO_NOT_SELL_FILE = PROJECT_ROOT / "logs" / "do_not_sell_today.json"
+
 MARKET_OPEN = time(9, 15)
 MARKET_CLOSE = time(15, 30)
 # Swing positions move on the order of minutes to days, not seconds -- no
@@ -194,6 +208,7 @@ class SwingLogger:
         "swing_trailing_armed",
         "swing_exit",
         "swing_crash_stop_loss_exit",
+        "swing_sell_suppressed",
         "swing_position_closed_externally",
         "swing_funded_amount_unavailable",
         "swing_big_move",
@@ -404,6 +419,18 @@ def _is_same_day_entry(st: dict, today: date) -> bool:
     return date.fromisoformat(st["entry_date"]) == today
 
 
+def _is_sell_suppressed_today(symbol: str, today: date) -> bool:
+    """True if the trader has manually blocked an automated sell on this
+    symbol today -- see DO_NOT_SELL_FILE's own comment. Missing/malformed/
+    stale-dated file all just mean "not suppressed" -- never let a read
+    failure here accidentally BLOCK a real protective sell."""
+    try:
+        data = json.loads(DO_NOT_SELL_FILE.read_text())
+        return data.get("date") == today.isoformat() and symbol in (data.get("symbols") or [])
+    except (OSError, json.JSONDecodeError, ValueError):
+        return False
+
+
 def _same_day_arm_threshold_pct(position_value: float) -> float:
     """Identical rule to intraday_live._arm_threshold_pct: breakeven% (this
     trade's real intraday round-trip cost) + INTRADAY_ARM_MARGIN_PCT. MTF is
@@ -575,6 +602,12 @@ def check_once(kite, state: dict[str, dict], logger: SwingLogger) -> None:
             threshold = NIFTY50_CRASH_STOP_LOSS_PCT if symbol in NIFTY_50_SYMBOLS else CRASH_STOP_LOSS_PCT
             day_move = (ltp - prev_close) / prev_close
             if day_move <= -threshold:
+                if _is_sell_suppressed_today(symbol, today):
+                    logger.event(
+                        "swing_sell_suppressed", symbol=symbol, trigger="crash_stop_loss",
+                        day_move_pct=round(day_move * 100, 2),
+                    )
+                    continue
                 qty = positions[symbol]["quantity"]  # re-read fresh, never cached
                 try:
                     order_id = orders.place_mtf_order(kite, symbol, "SELL", qty, ltp, tag="swing_crash_sl")
@@ -630,6 +663,13 @@ def check_once(kite, state: dict[str, dict], logger: SwingLogger) -> None:
             trail_pct = _trail_pct_for(st, today)
             stop_level = max(st.get("floor_price", 0.0), st["peak_price"] * (1 - trail_pct))
             if ltp > stop_level:
+                continue
+
+            if _is_sell_suppressed_today(symbol, today):
+                logger.event(
+                    "swing_sell_suppressed", symbol=symbol, trigger="trailing_stop",
+                    ltp=ltp, stop_level=round(stop_level, 2),
+                )
                 continue
 
             qty = positions[symbol]["quantity"]  # re-read fresh, never cached, in case of a manual partial sell
