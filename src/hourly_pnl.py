@@ -209,10 +209,14 @@ def _open_positions_section(kite) -> str:
     return "\n".join(lines)
 
 
-def _fifo_realized(orders_today: list[dict], seed: tuple[float, int] | None) -> tuple[float, int]:
+def _fifo_realized(orders_today: list[dict], seed: tuple[float, int] | None) -> tuple[float, int, float]:
     """FIFO-match one symbol's today's COMPLETE orders (chronological order),
     optionally seeded with a pre-existing (avg_price, qty) lot carried in
-    from before today. Returns (realized_pnl, quantity_closed).
+    from before today. Returns (realized_pnl, quantity_closed,
+    cost_basis_matched) -- cost_basis_matched (the matched lots' own value,
+    lot_price * matched_qty summed) is needed to compute a % return for a
+    close that may span several lots at different prices, added 2026-11-15
+    for digest.py's manually-closed section.
 
     Same matching rule as src/live.py's _reconstruct_symbol_state (kept as an
     independent copy rather than imported -- that function feeds real-money
@@ -224,6 +228,7 @@ def _fifo_realized(orders_today: list[dict], seed: tuple[float, int] | None) -> 
         queue.append([seed[0], seed[1], "BUY"])  # MTF is long-only; a carried-in seed is always a BUY lot
     realized = 0.0
     closed_qty = 0
+    cost_basis_matched = 0.0
     for o in sorted(orders_today, key=lambda o: o.get("order_timestamp") or ""):
         side = o["transaction_type"]
         qty = o["filled_quantity"]
@@ -233,6 +238,7 @@ def _fifo_realized(orders_today: list[dict], seed: tuple[float, int] | None) -> 
                 lot_price, lot_qty, lot_side = queue[0]
                 matched = min(qty, lot_qty)
                 realized += (price - lot_price) * matched if lot_side == "BUY" else (lot_price - price) * matched
+                cost_basis_matched += lot_price * matched
                 closed_qty += matched
                 lot_qty -= matched
                 qty -= matched
@@ -243,21 +249,23 @@ def _fifo_realized(orders_today: list[dict], seed: tuple[float, int] | None) -> 
             else:
                 queue.append([price, qty, side])
                 qty = 0
-    return realized, closed_qty
+    return realized, closed_qty, cost_basis_matched
 
 
-def build_hourly_report(kite) -> str | None:
-    """Everything realized (closed) so far TODAY, recomputed fresh each call
-    -- cumulative for the whole day, not just since the last report, so each
-    hour's message stands alone. Also carries every open position's
-    trailing status (see _open_positions_section) -- added 2026-11-11,
-    explicit request. Returns None only on an actual orders-fetch failure;
-    unlike before, a quiet hour with nothing sold still sends a message now,
-    since the open-position status is useful every hour regardless."""
+def compute_closed_today(kite) -> list[tuple[str, str, int, float, float]] | None:
+    """Every symbol+product closed (fully or partially) TODAY, by FIFO-
+    matching kite.orders() -- see this module's own docstring for why this
+    catches a MANUAL sell/cover too, not just a bot-triggered one. Returns
+    [(symbol, product, qty, realized_pnl, cost_basis_matched), ...], or None
+    only on an orders-fetch failure. Shared by build_hourly_report and
+    digest.py's "also closed manually" section (added 2026-11-15 -- the EOD
+    report only replayed the guardians' own exit events, so a position the
+    trader closed manually, e.g. a real LUPIN/ONGC case, never appeared
+    there at all even though this function already caught it correctly)."""
     try:
         all_orders = kite.orders()
     except orders.PLACEMENT_EXCEPTIONS as exc:
-        _log(f"could not fetch orders ({exc!r}) -- skipping this hour's report")
+        _log(f"could not fetch orders ({exc!r})")
         return None
 
     by_symbol_product: dict[tuple[str, str], list[dict]] = {}
@@ -268,8 +276,7 @@ def build_hourly_report(kite) -> str | None:
 
     cost_basis_cache = _load_mtf_cost_basis_cache()
 
-    rows: list[tuple[str, str, int, float]] = []
-    total = 0.0
+    rows: list[tuple[str, str, int, float, float]] = []
     for (symbol, product), order_list in sorted(by_symbol_product.items()):
         seed = None
         # Only seed from the cache when there's no BUY of this symbol in today's
@@ -282,11 +289,26 @@ def build_hourly_report(kite) -> str | None:
             carried = cost_basis_cache.get(symbol)
             if carried:
                 seed = (carried["average_price"], carried["quantity"])
-        realized, closed_qty = _fifo_realized(order_list, seed)
+        realized, closed_qty, cost_basis_matched = _fifo_realized(order_list, seed)
         if closed_qty == 0:
             continue  # opened today (or still open from before), nothing actually closed
-        total += realized
-        rows.append((symbol, product, closed_qty, realized))
+        rows.append((symbol, product, closed_qty, realized, cost_basis_matched))
+    return rows
+
+
+def build_hourly_report(kite) -> str | None:
+    """Everything realized (closed) so far TODAY, recomputed fresh each call
+    -- cumulative for the whole day, not just since the last report, so each
+    hour's message stands alone. Also carries every open position's
+    trailing status (see _open_positions_section) -- added 2026-11-11,
+    explicit request. Returns None only on an actual orders-fetch failure;
+    unlike before, a quiet hour with nothing sold still sends a message now,
+    since the open-position status is useful every hour regardless."""
+    rows = compute_closed_today(kite)
+    if rows is None:
+        _log("skipping this hour's report")
+        return None
+    total = sum(r[3] for r in rows)
 
     now_str = datetime.now(IST).strftime("%H:%M")
     lines = [
@@ -300,7 +322,7 @@ def build_hourly_report(kite) -> str | None:
         lines.append(f"Today's realized P&L so far: {_signed_rupees(total)}")
         lines.append("")
         lines.append("Sold today (includes trades booked manually, not just bot exits):")
-        for symbol, product, qty, pnl in sorted(rows, key=lambda r: -r[3]):
+        for symbol, product, qty, pnl, _cost_basis in sorted(rows, key=lambda r: -r[3]):
             emoji = "✅" if pnl >= 0 else "\U0001F53B"  # checkmark / red triangle down
             lines.append(f"{emoji} {symbol} ({product}) qty {qty}: {_signed_rupees(pnl)}")
     else:

@@ -14,17 +14,32 @@ The three INSTANT alerts (trailing armed, sold, +-3% move) are unaffected --
 they still fire from swing_live.py/intraday_live.py the moment they happen;
 this module only covers the one daily report.
 
-The sold-today recap for BOTH guardians is reconstructed by replaying
-today's own JSONL log files rather than depending on either guardian's
-live in-memory state -- a guardian crash/restart can't break this report,
-and it can't break a guardian either (every failure here is caught, never
-raised).
+The BOT-TRIGGERED sold-today recap is reconstructed by replaying today's
+own JSONL log files rather than depending on either guardian's live
+in-memory state -- a guardian crash/restart can't break this report, and it
+can't break a guardian either (every failure here is caught, never raised).
+
+Extended 2026-11-15, explicit request, after a real gap surfaced: a
+position closed MANUALLY (via the Kite app/website directly, not by the
+guardian) never appears in that log-replay recap at all, because the
+guardian only ever logs "...position_closed_externally" with no P&L for
+one of those -- it never saw the fill. Two real trades (LUPIN, ONGC) closed
+manually and were correctly shown in the hourly update (which already
+FIFO-matches kite.orders() for exactly this reason -- see hourly_pnl.py's
+own docstring) but silently missing from THIS report. Fixed by adding a
+separate "Also closed today (booked manually)" section that reuses
+hourly_pnl.compute_closed_today() and shows whatever it found that the
+bot-triggered section above didn't already cover. This is the one thing in
+this module that needs a live Kite session -- build_eod_table now takes
+`kite` again.
 """
 
 import json
 from datetime import date, datetime, time
 from pathlib import Path
 from zoneinfo import ZoneInfo
+
+from . import hourly_pnl
 
 IST = ZoneInfo("Asia/Kolkata")
 LOG_DIR = Path(__file__).resolve().parent.parent / "logs"
@@ -90,9 +105,10 @@ def _todays_log_records(glob_pattern: str, today_str: str) -> list[dict]:
     return records
 
 
-def _sold_today_section(today_str: str) -> tuple[str, float]:
-    """Returns (formatted lines, total gross P&L across every sell today) --
-    the total is needed by build_eod_table for the grand-total summary line.
+def _sold_today_section(today_str: str) -> tuple[str, float, set[tuple[str, str]]]:
+    """Returns (formatted lines, total gross P&L across every BOT-triggered
+    sell today, {(symbol, product) already covered here}) -- the keys set
+    lets _manually_closed_section below know which closes NOT to repeat.
     Each row now also shows the % RETURN (gross P&L / position value),
     added 2026-11-11 alongside the rupee figure, for both MTF and MIS."""
     records = _todays_log_records("swing_*.jsonl", today_str) + _todays_log_records("intraday_manual_*.jsonl", today_str)
@@ -100,11 +116,12 @@ def _sold_today_section(today_str: str) -> tuple[str, float]:
         "swing_exit", "swing_crash_stop_loss_exit", "intraday_exit", "intraday_stop_loss_exit", "intraday_square_off"
     )]
     if not sells:
-        return "No sells today.", 0.0
+        return "No sells today.", 0.0, set()
     sells.sort(key=lambda r: r.get("timestamp", ""))
 
     lines = []
     total = 0.0
+    covered_keys: set[tuple[str, str]] = set()
     for r in sells:
         sym = r.get("symbol", "?")
         qty = r.get("qty")
@@ -135,24 +152,52 @@ def _sold_today_section(today_str: str) -> tuple[str, float]:
         else:
             pnl_str = "n/a"
         lines.append(f"  {ts}  {sym} ({product}) — {qty} @ ₹{_money(price)} ({reason}) → P&L {pnl_str}")
+        covered_keys.add((sym, product))
+    return _escape_html("\n".join(lines)), total, covered_keys
+
+
+def _manually_closed_section(kite, covered_keys: set[tuple[str, str]]) -> tuple[str, float] | None:
+    """Everything closed today per kite.orders() FIFO-matching (see
+    hourly_pnl.compute_closed_today -- same technique that module already
+    uses, which catches a sell booked MANUALLY via Kite directly, not just
+    the guardian's own exits) whose (symbol, product) ISN'T already in
+    covered_keys above. Returns None on an orders-fetch failure or when
+    every closed symbol today was already bot-triggered (nothing left to
+    add here)."""
+    rows = hourly_pnl.compute_closed_today(kite)
+    if rows is None:
+        return None
+    manual_rows = [r for r in rows if (r[0], r[1]) not in covered_keys]
+    if not manual_rows:
+        return None
+    lines = []
+    total = 0.0
+    for symbol, product, qty, pnl, cost_basis in sorted(manual_rows, key=lambda r: -r[3]):
+        total += pnl
+        pct_str = f" ({pnl / cost_basis * 100:+.2f}%)" if cost_basis else ""
+        lines.append(f"  {symbol} ({product}) — qty {qty}: {_signed_money(pnl)}{pct_str}")
     return _escape_html("\n".join(lines)), total
 
 
-def build_eod_table() -> str | None:
-    """Returns the HTML-ready message, or None if nothing sold today (no
-    message is sent that day in that case -- this report no longer shows
-    open positions at all, see this module's own docstring, so a quiet day
-    genuinely has nothing to say here)."""
+def build_eod_table(kite) -> str | None:
+    """Returns the HTML-ready message, or None if nothing closed today at
+    all -- bot-triggered or manual (no message is sent that day in that
+    case; this report no longer shows open positions, see this module's own
+    docstring, so a quiet day genuinely has nothing to say here)."""
     today_str = datetime.now(IST).date().isoformat()
-    sold_text, sold_total = _sold_today_section(today_str)
-    if sold_text == "No sells today.":
+    sold_text, sold_total, covered_keys = _sold_today_section(today_str)
+    manual = _manually_closed_section(kite, covered_keys)
+
+    if sold_text == "No sells today." and manual is None:
         return None
 
-    total_line = f"<b>Total realized P&amp;L today (gross, all sells): {_signed_money(sold_total)}</b>\n\n"
+    grand_total = sold_total + (manual[1] if manual else 0.0)
+    total_line = f"<b>Total realized P&amp;L today (gross, all sells): {_signed_money(grand_total)}</b>\n\n"
 
-    return (f"📋 End-of-day report — {today_str}\n\n"
-            f"<b>Closed today (MTF &amp; MIS):</b>\n{sold_text}\n\n"
-            f"{total_line}")
+    bot_block = f"<b>Closed today (MTF &amp; MIS):</b>\n{sold_text}\n\n" if sold_text != "No sells today." else ""
+    manual_block = f"<b>Also closed today (booked manually, not by the bot):</b>\n{manual[0]}\n\n" if manual else ""
+
+    return f"📋 End-of-day report — {today_str}\n\n{bot_block}{manual_block}{total_line}"
 
 
 def run_digest_loop(get_kite, notifier, should_stop=None, poll_interval: int = 30) -> None:
@@ -162,11 +207,12 @@ def run_digest_loop(get_kite, notifier, should_stop=None, poll_interval: int = 3
     so it can't take a guardian down, and a guardian crash/restart can't
     break this loop either.
 
-    `get_kite` is accepted but unused -- kept so this call's signature in
-    scripts/run_all_guardians.py doesn't need touching. build_eod_table()
-    no longer needs a Kite session at all (see its own docstring: it's pure
-    log-file replay now), so a stale/expired token can never block this
-    report the way it theoretically could have before.
+    `get_kite` is used again as of 2026-11-15 -- build_eod_table() needs a
+    live session for its manually-closed section (hourly_pnl.compute_closed_
+    today calls kite.orders()). If that call fails (e.g. a stale token), the
+    bot-triggered section above still gets built and sent on its own --
+    _manually_closed_section returns None on a fetch failure rather than
+    raising, so a Kite hiccup degrades this report, it doesn't blank it.
 
     `sent_today` is in-memory only: a process restart after EOD_TABLE_TIME
     has already passed today will NOT re-send it today (so a crash-restart
@@ -193,7 +239,8 @@ def run_digest_loop(get_kite, notifier, should_stop=None, poll_interval: int = 3
         if now.time() >= EOD_TABLE_TIME and now.date() not in sent_today:
             sent_today.add(now.date())
             try:
-                message = build_eod_table()
+                kite = get_kite()
+                message = build_eod_table(kite)
                 if message and notifier:
                     sent_ok = notifier(message, parse_mode="HTML")
                     _log(f"end-of-day report sent (notifier returned {sent_ok!r})")
