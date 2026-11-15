@@ -23,9 +23,13 @@ def format_event(kind: str, fields: dict, label: str = "") -> str:
                 fields.get("trigger"), fields.get("trigger", "a sell rule")
             )
             extra = f" ({abs(float(fields['day_move_pct'])):.2f}% today)" if fields.get("day_move_pct") is not None else ""
-            return (f"⚠️ {tag}{sym}: a sell WAS triggered by {trigger}{extra}, but it's on your "
-                    f"do-not-sell list for today, so it was NOT placed. You are holding this with NO automated "
-                    f"downside protection right now -- that's the trade-off of the override.")
+            reason = (
+                "you have an active GTT (stop-loss + target) on it, so you're managing it yourself"
+                if fields.get("reason") == "manual_gtt"
+                else "it's on your do-not-sell list for today"
+            )
+            return (f"⚠️ {tag}{sym}: a sell WAS triggered by {trigger}{extra}, but {reason}, so it was NOT placed. "
+                    f"You are holding this with NO automated downside protection right now -- that's the trade-off.")
         if kind.endswith("_trailing_armed"):
             return (f"📈 {tag}Trailing stop STARTED — {sym}\n"
                     f"Armed at {_money(fields['armed_at'])} ({float(fields['arm_pct']):.2f}% in profit vs avg {_money(fields['avg_price'])}). "

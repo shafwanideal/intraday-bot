@@ -14,6 +14,12 @@ live LTP. Since that status is useful even on a quiet hour with nothing
 sold, this report now fires every REPORT_HOURS hour unconditionally
 (previously it stayed silent on a quiet hour).
 
+Extended again 2026-11-15, explicit request: a symbol the trader is
+managing manually (an active two-leg Kite GTT -- see
+swing_live.fetch_manual_gtt_info) is still listed here, marked MANUAL, with
+the trader's own SL/target levels and current profit -- "hands-off for the
+guardian" was never meant to mean "no information in Telegram either."
+
 Why this needs its own FIFO matching rather than reusing swing_exit/
 intraday_exit log events: those events only exist for exits the GUARDIANS
 themselves placed. A manual sell/cover via the Kite app or website never
@@ -51,7 +57,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from . import intraday_live, orders
-from .swing_live import MTF_COST_BASIS_FILE, SWING_STATE_FILE
+from .swing_live import MTF_COST_BASIS_FILE, SWING_STATE_FILE, fetch_manual_gtt_info
 
 IST = ZoneInfo("Asia/Kolkata")
 LOG_DIR = Path(__file__).resolve().parent.parent / "logs"
@@ -80,6 +86,10 @@ def _log(line: str) -> None:
 def _signed_rupees(amount: float) -> str:
     sign = "+" if amount >= 0 else "-"
     return f"{sign}Rs {abs(amount):,.2f}"
+
+
+def _rupees(amount: float) -> str:
+    return f"Rs {amount:,.2f}"
 
 
 def _load_mtf_cost_basis_cache() -> dict[str, dict]:
@@ -130,6 +140,7 @@ def _open_positions_section(kite) -> str:
     mtf = [p for p in net if p.get("product") == orders.PRODUCT_MTF and p.get("quantity", 0) > 0]
     if mtf:
         swing_state = _load_swing_state()
+        manual_gtt_info = fetch_manual_gtt_info(kite)
         quotes = _safe_quote(kite, [p["tradingsymbol"] for p in mtf])
         for p in mtf:
             sym, qty, avg = p["tradingsymbol"], p["quantity"], p["average_price"]
@@ -139,6 +150,19 @@ def _open_positions_section(kite) -> str:
                 continue
             cur_pnl = (ltp - avg) * qty
             cur_pct = _pct(cur_pnl, avg, qty)
+            gtt = manual_gtt_info.get(sym)
+            if gtt:
+                # Managed by the trader's own GTT, not this guardian -- see
+                # swing_live.fetch_manual_gtt_info. Shown here regardless (per
+                # explicit instruction: "the telegram notification should
+                # include the manually managed stocks too") alongside the SL/
+                # target levels the trader set, so there's no need to open
+                # Kite just to check how close price is to either one.
+                lines.append(
+                    f"  \U0001f527 {sym} (MTF): MANUAL -- your GTT SL {_rupees(gtt['sl'])} / target {_rupees(gtt['target'])}, "
+                    f"current {_signed_rupees(cur_pnl)} ({cur_pct:+.2f}%)"
+                )
+                continue
             st = swing_state.get(sym)
             if st and st.get("trailing") and st.get("floor_price"):
                 min_pnl = (st["floor_price"] - avg) * qty

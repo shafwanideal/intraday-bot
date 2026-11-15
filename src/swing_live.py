@@ -129,6 +129,20 @@ MTF_COST_BASIS_FILE = PROJECT_ROOT / "logs" / "mtf_cost_basis.json"
 # wasn't worth the risk versus one shell command.
 DO_NOT_SELL_FILE = PROJECT_ROOT / "logs" / "do_not_sell_today.json"
 
+# Standing "I'm managing this one myself" signal, added 2026-11-15 per explicit
+# instruction: rather than a list the trader has to remember to update, this
+# detects a real Kite GTT (Good Till Triggered order) the trader placed on a
+# holding -- specifically a two-leg (OCO) GTT, which is exactly "stop-loss +
+# target" bundled in one order, Kite's own normal way to set both without
+# watching the position live. A symbol with an active two-leg GTT is treated
+# as fully hands-off by this guardian for as long as that GTT exists -- no
+# crash stop-loss, no trailing-stop exit -- self-updating the moment the
+# trader places or cancels/triggers the GTT, no file to maintain. Still gets
+# the big-move alert and (per explicit instruction) a line in the hourly
+# Telegram report, same as any other open holding -- "hands-off" means no
+# automated SELL, not no information.
+MANUAL_GTT_CACHE_FILE = PROJECT_ROOT / "logs" / "manual_gtt_cache.json"
+
 MARKET_OPEN = time(9, 15)
 MARKET_CLOSE = time(15, 30)
 # Swing positions move on the order of minutes to days, not seconds -- no
@@ -431,6 +445,39 @@ def _is_sell_suppressed_today(symbol: str, today: date) -> bool:
         return False
 
 
+def fetch_manual_gtt_info(kite) -> dict[str, dict]:
+    """{symbol: {"sl": float, "target": float}} for every symbol with an
+    ACTIVE two-leg (OCO) GTT right now -- see MANUAL_GTT_CACHE_FILE's own
+    comment for what this means and why. On a fetch failure, falls back to
+    the LAST successfully observed set (persisted here on every successful
+    call) rather than treating the failure as "nothing is GTT-managed" --
+    same reasoning as this module's other fetch-failure handling: a
+    transient hiccup must never look identical to "the trader isn't
+    managing this anymore" in a way that could let a real sell through
+    during the one poll the fetch happened to fail."""
+    try:
+        gtts = kite.get_gtts()
+    except orders.PLACEMENT_EXCEPTIONS:
+        try:
+            return json.loads(MANUAL_GTT_CACHE_FILE.read_text())
+        except (OSError, json.JSONDecodeError):
+            return {}
+    result = {}
+    for g in gtts:
+        if g.get("status") != "active" or g.get("type") != "two-leg":
+            continue
+        cond = g.get("condition") or {}
+        symbol = cond.get("tradingsymbol")
+        values = cond.get("trigger_values") or []
+        if symbol and len(values) == 2:
+            result[symbol] = {"sl": float(values[0]), "target": float(values[1])}
+    try:
+        MANUAL_GTT_CACHE_FILE.write_text(json.dumps(result))
+    except OSError:
+        pass
+    return result
+
+
 def _same_day_arm_threshold_pct(position_value: float) -> float:
     """Identical rule to intraday_live._arm_threshold_pct: breakeven% (this
     trade's real intraday round-trip cost) + INTRADAY_ARM_MARGIN_PCT. MTF is
@@ -577,6 +624,7 @@ def check_once(kite, state: dict[str, dict], logger: SwingLogger) -> None:
         return
 
     quotes = _fetch_quotes(kite, list(positions.keys()))
+    manual_gtt_info = fetch_manual_gtt_info(kite)
 
     for symbol, pos in positions.items():
         quote = quotes.get(symbol)
@@ -585,6 +633,7 @@ def check_once(kite, state: dict[str, dict], logger: SwingLogger) -> None:
         ltp = quote["ltp"]
         avg_price = pos["average_price"]
         st = state[symbol]
+        is_manual = symbol in manual_gtt_info
 
         if not st.get("notified_big_move") and abs(ltp - avg_price) / avg_price >= BIG_MOVE_PCT:
             st["notified_big_move"] = True
@@ -602,9 +651,10 @@ def check_once(kite, state: dict[str, dict], logger: SwingLogger) -> None:
             threshold = NIFTY50_CRASH_STOP_LOSS_PCT if symbol in NIFTY_50_SYMBOLS else CRASH_STOP_LOSS_PCT
             day_move = (ltp - prev_close) / prev_close
             if day_move <= -threshold:
-                if _is_sell_suppressed_today(symbol, today):
+                if is_manual or _is_sell_suppressed_today(symbol, today):
                     logger.event(
                         "swing_sell_suppressed", symbol=symbol, trigger="crash_stop_loss",
+                        reason="manual_gtt" if is_manual else "do_not_sell_list",
                         day_move_pct=round(day_move * 100, 2),
                     )
                     continue
@@ -665,9 +715,10 @@ def check_once(kite, state: dict[str, dict], logger: SwingLogger) -> None:
             if ltp > stop_level:
                 continue
 
-            if _is_sell_suppressed_today(symbol, today):
+            if is_manual or _is_sell_suppressed_today(symbol, today):
                 logger.event(
                     "swing_sell_suppressed", symbol=symbol, trigger="trailing_stop",
+                    reason="manual_gtt" if is_manual else "do_not_sell_list",
                     ltp=ltp, stop_level=round(stop_level, 2),
                 )
                 continue
