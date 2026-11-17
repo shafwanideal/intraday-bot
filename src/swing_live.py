@@ -174,6 +174,21 @@ MISSING_POLLS_BEFORE_DROP = 3
 # position (see state["notified_big_move"]), not on every poll past the threshold.
 BIG_MOVE_PCT = 0.03
 
+# Rupee-profit-step floor, added 2026-11-17 per explicit instruction: once trailing is
+# armed, every full Rs 1,000 of PEAK unrealized profit becomes a new floor in its own
+# right, on top of (never instead of) the existing arm-level floor_price and %-trail.
+# E.g. peak profit reaches Rs 3,200 -> floor is now "avg_price + Rs 3,000/qty"; if peak
+# later reaches Rs 4,100, the floor becomes "avg_price + Rs 4,000/qty". Monotonic for
+# free: it is recomputed from peak_price every poll, and peak_price itself only ever
+# rises, so this floor can only ever rise too -- no new persisted state needed.
+# Deliberately a FLAT rupee amount, not scaled to position size: this is what was
+# asked for, but it means a small step is tight (much tighter than the 0.5% trail) on
+# a big position and loose on a small one -- e.g. Rs 1,000 is 0.14% on a Rs 7L ITC
+# position but was ~1.3% of LENSKART's Rs 1,83,750 position, the trade that prompted
+# this. Revisit if a large holding starts getting stopped out by ordinary noise because
+# of this.
+RUPEE_PROFIT_STEP = 1000.0
+
 # Crash stop-loss, requested 2026-11-07: ANY MTF holding that falls more than this
 # much TODAY (vs yesterday's close, not vs your average price -- a position up 20%
 # overall can still be crashing today) gets sold immediately, regardless of
@@ -711,7 +726,15 @@ def check_once(kite, state: dict[str, dict], logger: SwingLogger) -> None:
             # same-day under the tight intraday-style trail automatically widens to swing's own
             # TRAILING_PCT the moment it's carried into a second day -- see _trail_pct_for.
             trail_pct = _trail_pct_for(st, today)
-            stop_level = max(st.get("floor_price", 0.0), st["peak_price"] * (1 - trail_pct))
+            # Rupee-profit-step floor -- see RUPEE_PROFIT_STEP's own comment. Recomputed
+            # fresh from peak_price (not persisted) so it inherits that field's own
+            # monotonic guarantee for free.
+            qty_now = pos["quantity"]
+            peak_profit = (st["peak_price"] - avg_price) * qty_now
+            step_floor_pnl = (int(peak_profit // RUPEE_PROFIT_STEP) * RUPEE_PROFIT_STEP) if peak_profit > 0 else 0.0
+            step_floor_price = avg_price + step_floor_pnl / qty_now if qty_now else 0.0
+            floor_price = max(st.get("floor_price", 0.0), step_floor_price)
+            stop_level = max(floor_price, st["peak_price"] * (1 - trail_pct))
             if ltp > stop_level:
                 continue
 
