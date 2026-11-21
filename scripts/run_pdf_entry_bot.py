@@ -13,10 +13,13 @@ Usage (run alongside run_all_guardians.py, in a separate pane):
 Requires PDF_ENTRY_TRADING_ENABLED=true in .env (a separate gate from
 LIVE_TRADING_ENABLED -- see src/pdf_entry_live.py's own docstring for why).
 
-To hand it a new pick, write a JSON list to logs/pending_picks.json, e.g.:
-    [{"symbol": "EXIDEIND", "buy_low": 400, "buy_high": 402, "sl": 388,
-      "t1": 412, "t2": 426, "capital": 50000}]
+This bot never buys -- the trader places every MTF buy himself, from the PDF.
+To hand it a pick to watch, write a JSON list to logs/pending_picks.json,
+e.g.:
+    [{"symbol": "EXIDEIND", "sl": 388, "t1": 412, "t2": 426}]
 It's consumed and the file cleared within one poll (POLL_INTERVAL_SECONDS).
+Once his MTF buy for that symbol shows up in kite.positions(), the bot
+splits it 50/50 and places the two exit GTTs automatically.
 """
 
 import sys
