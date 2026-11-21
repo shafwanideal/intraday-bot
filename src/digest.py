@@ -110,7 +110,14 @@ def _sold_today_section(today_str: str) -> tuple[str, float, set[tuple[str, str]
     sell today, {(symbol, product) already covered here}) -- the keys set
     lets _manually_closed_section below know which closes NOT to repeat.
     Each row now also shows the % RETURN (gross P&L / position value),
-    added 2026-11-11 alongside the rupee figure, for both MTF and MIS."""
+    added 2026-11-11 alongside the rupee figure, for both MTF and MIS.
+
+    An MTF row also shows a net-after-charges figure when the underlying
+    swing_exit/swing_crash_stop_loss_exit log record carries one (added
+    2026-11-21, explicit request, same net_pnl swing_live.py now logs for
+    the instant Telegram alert -- see swing_strategy.compute_mtf_net_pnl).
+    MIS rows never have this -- intraday has a different, simpler cost
+    structure and this module doesn't attempt that calculation for it."""
     records = _todays_log_records("swing_*.jsonl", today_str) + _todays_log_records("intraday_manual_*.jsonl", today_str)
     sells = [r for r in records if r.get("kind") in (
         "swing_exit", "swing_crash_stop_loss_exit", "intraday_exit", "intraday_stop_loss_exit", "intraday_square_off"
@@ -144,11 +151,13 @@ def _sold_today_section(today_str: str) -> tuple[str, float, set[tuple[str, str]
             pnl = (price - avg) * qty * (1 if direction == "long" else -1) if None not in (price, avg, qty) else None
         if pnl is not None:
             total += pnl
+        net_pnl = r.get("net_pnl") if r["kind"] in ("swing_exit", "swing_crash_stop_loss_exit") else None
+        net_str = f", net ~₹{_money(net_pnl)} after charges" if net_pnl is not None else ""
         if pnl is not None and avg and qty:
             pct = pnl / (avg * qty) * 100
-            pnl_str = f"₹{_money(pnl)} ({pct:+.2f}%, gross)"
+            pnl_str = f"₹{_money(pnl)} ({pct:+.2f}%, gross){net_str}"
         elif pnl is not None:
-            pnl_str = f"₹{_money(pnl)} (gross)"
+            pnl_str = f"₹{_money(pnl)} (gross){net_str}"
         else:
             pnl_str = "n/a"
         lines.append(f"  {ts}  {sym} ({product}) — {qty} @ ₹{_money(price)} ({reason}) → P&L {pnl_str}")
