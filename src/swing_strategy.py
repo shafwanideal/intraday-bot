@@ -132,6 +132,31 @@ def compute_mtf_breakeven_pct(position_value: float, funded_amount: float, days_
     return x
 
 
+def compute_mtf_net_pnl(
+    gross_pnl: float, position_value: float, exit_value: float, funded_amount: float | None, days_held: int
+) -> float | None:
+    """Real realized P&L after Zerodha's actual MTF round-trip charges --
+    same cost model as compute_mtf_breakeven_pct (entry + exit order costs,
+    pledge AND unpledge, and the daily funding interest on `funded_amount`
+    over `days_held`), just returning absolute rupees instead of a
+    breakeven %. Added 2026-11-21, explicit request, for the sell alert to
+    show a real after-charges figure alongside the existing gross one.
+
+    Treats the position as if bought in a single order at `position_value`
+    (avg_price * qty) -- an approximation when the real entry was averaged
+    across multiple legs at different sizes, same approximation
+    compute_mtf_breakeven_pct already makes. Returns None if funded_amount
+    is unavailable (the daily interest term can't be computed without it)
+    rather than silently reporting an understated net figure."""
+    if funded_amount is None:
+        return None
+    buy_cost = mtf_order_cost(position_value, "buy")
+    sell_cost = mtf_order_cost(exit_value, "sell")
+    pledge_roundtrip = 2 * MTF_PLEDGE_CHARGE
+    interest = mtf_interest(funded_amount, days_held)
+    return gross_pnl - (buy_cost + sell_cost + pledge_roundtrip + interest)
+
+
 @dataclass
 class SwingPosition:
     symbol: str

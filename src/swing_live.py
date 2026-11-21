@@ -81,7 +81,7 @@ from zoneinfo import ZoneInfo
 from . import alerts, auth, config, heartbeat, orders
 from .intraday_live import INTRADAY_ARM_MARGIN_PCT
 from .strategy import GRID_PCT, compute_intraday_breakeven_pct
-from .swing_strategy import PROFIT_TARGET_PCT, TRAILING_PCT, compute_mtf_breakeven_pct
+from .swing_strategy import PROFIT_TARGET_PCT, TRAILING_PCT, compute_mtf_breakeven_pct, compute_mtf_net_pnl
 
 # Same percentages the intraday guardian uses -- kept in sync by importing the
 # same underlying constants rather than hardcoding a second copy of 1% / 0.5% / 0.75%.
@@ -700,6 +700,12 @@ def check_once(kite, state: dict[str, dict], logger: SwingLogger) -> None:
                 fill_price = fill["average_price"] or ltp
                 filled_qty = fill["filled_quantity"] or qty
                 gross_pnl = (fill_price - avg_price) * filled_qty
+                pct_gain = (fill_price - avg_price) / avg_price * 100 if avg_price else None
+                entry_date = date.fromisoformat(st["entry_date"]) if st.get("entry_date") else today
+                days_held = max(0, (today - entry_date).days)
+                net_pnl = compute_mtf_net_pnl(
+                    gross_pnl, avg_price * filled_qty, fill_price * filled_qty, st.get("funded_amount"), days_held
+                )
                 logger.event(
                     "swing_crash_stop_loss_exit",
                     symbol=symbol,
@@ -709,6 +715,8 @@ def check_once(kite, state: dict[str, dict], logger: SwingLogger) -> None:
                     prev_close=prev_close,
                     day_move_pct=round(day_move * 100, 2),
                     gross_pnl=round(gross_pnl, 2),
+                    pct_gain=round(pct_gain, 2) if pct_gain is not None else None,
+                    net_pnl=round(net_pnl, 2) if net_pnl is not None else None,
                 )
                 del state[symbol]
                 continue
@@ -773,6 +781,12 @@ def check_once(kite, state: dict[str, dict], logger: SwingLogger) -> None:
             fill_price = fill["average_price"] or ltp
             filled_qty = fill["filled_quantity"] or qty
             gross_pnl = (fill_price - avg_price) * filled_qty
+            pct_gain = (fill_price - avg_price) / avg_price * 100 if avg_price else None
+            entry_date = date.fromisoformat(st["entry_date"]) if st.get("entry_date") else today
+            days_held = max(0, (today - entry_date).days)
+            net_pnl = compute_mtf_net_pnl(
+                gross_pnl, avg_price * filled_qty, fill_price * filled_qty, st.get("funded_amount"), days_held
+            )
             logger.event(
                 "swing_exit",
                 symbol=symbol,
@@ -780,8 +794,14 @@ def check_once(kite, state: dict[str, dict], logger: SwingLogger) -> None:
                 price=fill_price,
                 avg_price=avg_price,
                 gross_pnl=round(gross_pnl, 2),
-                note="gross only -- excludes MTF daily funding interest and entry-side charges, which this "
-                "module never saw (entry was manual); see Kite's own ledger for the true net figure",
+                pct_gain=round(pct_gain, 2) if pct_gain is not None else None,
+                net_pnl=round(net_pnl, 2) if net_pnl is not None else None,
+                note=(
+                    "net_pnl is an estimate (treats entry as one order at avg_price, Zerodha's real MTF "
+                    "charges/interest applied) -- see Kite's own ledger for the exact figure"
+                    if net_pnl is not None
+                    else "net_pnl unavailable -- funded_amount could not be determined for this position"
+                ),
             )
             del state[symbol]
         else:

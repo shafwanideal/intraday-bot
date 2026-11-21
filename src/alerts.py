@@ -14,6 +14,33 @@ def _money(x) -> str:
         return str(x)
 
 
+def _pct_suffix(fields: dict) -> str:
+    """' (+1.75%)' style suffix for the gross % gain, when present -- added
+    2026-11-21, explicit request, alongside the rupee gross P&L already shown."""
+    pct = fields.get("pct_gain")
+    if pct is None:
+        return ""
+    try:
+        return f" ({float(pct):+.2f}%)"
+    except (TypeError, ValueError):
+        return ""
+
+
+def _net_suffix(fields: dict) -> str:
+    """', net ~₹X after charges' suffix, when the guardian could compute a
+    real after-charges figure (see swing_strategy.compute_mtf_net_pnl) --
+    added 2026-11-21, explicit request. Silent (no suffix at all) when
+    net_pnl is absent, e.g. funded_amount couldn't be determined for this
+    position -- never claims a net figure it doesn't actually have."""
+    net = fields.get("net_pnl")
+    if net is None:
+        return ""
+    try:
+        return f", net ~{_money(net)} after charges"
+    except (TypeError, ValueError):
+        return ""
+
+
 def format_event(kind: str, fields: dict, label: str = "") -> str:
     tag = f"[{label}] " if label else ""
     try:
@@ -38,7 +65,7 @@ def format_event(kind: str, fields: dict, label: str = "") -> str:
             qty, price, avg = fields.get("qty"), fields.get("price"), fields.get("avg_price")
             day_move = float(fields.get("day_move_pct", 0))
             pnl = fields.get("gross_pnl")
-            pnl_str = f", gross P&L {_money(pnl)} before charges" if pnl is not None else ""
+            pnl_str = f", gross P&L {_money(pnl)}{_pct_suffix(fields)} before charges{_net_suffix(fields)}" if pnl is not None else ""
             return (f"🚨🚨 {tag}CRASH STOP-LOSS — {sym} SOLD 🚨🚨\n"
                     f"Down {abs(day_move):.2f}% TODAY (prev close {_money(fields.get('prev_close'))} → {_money(price)}).\n"
                     f"{qty} @ {_money(price)} (avg {_money(avg)}){pnl_str}")
@@ -56,7 +83,7 @@ def format_event(kind: str, fields: dict, label: str = "") -> str:
             emoji = "🛑" if is_stop_loss else "✅"
             line = f"{emoji} {tag}{verb}{why} — {sym}\n{qty} @ {_money(price)}"
             if "gross_pnl" in fields:
-                line += f" (avg {_money(avg)}), gross P&L {_money(fields['gross_pnl'])} before charges"
+                line += f" (avg {_money(avg)}), gross P&L {_money(fields['gross_pnl'])}{_pct_suffix(fields)} before charges{_net_suffix(fields)}"
             elif avg is not None and price is not None and qty is not None:
                 gross = (float(price) - float(avg)) * float(qty) * (1 if direction == "long" else -1)
                 line += f" (avg {_money(avg)}), gross P&L ≈ {_money(gross)} before charges"
