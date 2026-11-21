@@ -76,6 +76,16 @@ STATE_FILE = LOG_DIR / "pdf_entry_state.json"
 
 POLL_INTERVAL_SECONDS = 30
 
+# Once both exit GTTs are live, Kite's own server watches the trigger -- no
+# polling lag at all for the SL/T1/T2 fire itself, so POLL_INTERVAL_SECONDS
+# is plenty for the floor-trail/bookkeeping work this loop still does. But
+# before that (waiting for the trader's manual buy to show up in
+# kite.positions(), or waiting to place the exit GTTs right after it does),
+# there's a real window with NO protection on the position at all -- a much
+# shorter poll here shrinks that window a lot, and kite.positions() is a
+# light read-only call, well within Kite's rate limits even every few seconds.
+FAST_POLL_INTERVAL_SECONDS = 5
+
 # Same tightened trail value the exit-only guardian settled on after its own
 # backtest (swing_live.py's TRAILING_PCT) -- reused here as a plain constant,
 # not imported, so this file has zero import-time dependency on swing_live.py.
@@ -397,17 +407,27 @@ def _advance_monitoring(kite, symbol: str, st: dict, logger: PdfEntryLogger) -> 
         _raise_gtt2_floor(kite, symbol, st, new_floor, logger, reason="trailing")
 
 
-def check_once(kite, state: dict[str, dict], logger: PdfEntryLogger) -> None:
+def check_once(kite, state: dict[str, dict], logger: PdfEntryLogger) -> bool:
+    """Returns True if any tracked symbol is still unprotected (waiting for
+    the manual buy to appear, or waiting to get its exit GTTs placed) -- the
+    caller uses this to decide whether to poll again at FAST_POLL_INTERVAL_SECONDS
+    instead of the normal POLL_INTERVAL_SECONDS (see run_pdf_entry_bot)."""
     _consume_pending_picks(state, logger)
+    needs_fast_poll = False
     for symbol, st in list(state.items()):
         phase = st["phase"]
         if phase == PHASE_AWAITING_POSITION:
             _advance_awaiting_position(kite, symbol, st, logger)
+            if st["phase"] in (PHASE_AWAITING_POSITION, PHASE_AWAITING_EXIT_SETUP):
+                needs_fast_poll = True
         elif phase == PHASE_AWAITING_EXIT_SETUP:
             _advance_awaiting_exit_setup(kite, symbol, st, logger)
+            if st["phase"] == PHASE_AWAITING_EXIT_SETUP:
+                needs_fast_poll = True
         elif phase == PHASE_MONITORING:
             _advance_monitoring(kite, symbol, st, logger)
     save_state(state)
+    return needs_fast_poll
 
 
 def run_pdf_entry_bot(poll_interval: int = POLL_INTERVAL_SECONDS, notifier=None, should_stop=None) -> None:
@@ -452,8 +472,9 @@ def run_pdf_entry_bot(poll_interval: int = POLL_INTERVAL_SECONDS, notifier=None,
             kite = fresh
             logger.event("kite_token_refreshed")
 
+        needs_fast_poll = False
         try:
-            check_once(kite, state, logger)
+            needs_fast_poll = check_once(kite, state, logger)
         except Exception as exc:  # noqa: BLE001 - one bad tick must never kill the whole process
             logger.event("pdf_entry_error", symbol="ALL", message=f"check_once failed: {exc!r}")
-        time_module.sleep(poll_interval)
+        time_module.sleep(FAST_POLL_INTERVAL_SECONDS if needs_fast_poll else poll_interval)
