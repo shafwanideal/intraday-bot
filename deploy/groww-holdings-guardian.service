@@ -1,0 +1,19 @@
+[Unit]
+Description=Groww delivery-holdings trailing stop guardian (alert-only until sells are proven)
+After=network-online.target
+Wants=network-online.target
+StartLimitBurst=5
+StartLimitIntervalSec=300
+
+[Service]
+Type=simple
+User=trader
+WorkingDirectory=__DIR__
+ExecStart=__DIR__/.venv/bin/python -u -m scripts.run_groww_holdings_guard
+Restart=always
+RestartSec=15
+Environment=PYTHONUNBUFFERED=1
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target
