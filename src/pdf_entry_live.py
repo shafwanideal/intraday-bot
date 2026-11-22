@@ -7,7 +7,9 @@ manually, in MTF, after he's seen the PDF -- this module never buys
 anything. He gives a symbol + SL + T1 + T2 (by uploading the PDF or just
 telling me the levels); once his MTF buy shows up in kite.positions(), this
 module splits it 50/50 and places two broker-side OCO GTTs: half booked HARD
-at T1, the other half's stop raised to a floor at T1 and trailed (same
+at T1, the other half's stop raised to a floor at his ORIGINAL BUY PRICE
+(breakeven -- "protect my capital", explicit instruction 2026-11-22, changed
+from an earlier version that floored at T1 instead) and trailed further (same
 floor-lock idea as swing_live.py's own TRAILING_PCT) toward T2. This is
 exit-only, same as the existing guardian -- the only difference is where
 SL/T1/T2 come from (an external pick, not a self-computed breakeven/arm
@@ -365,7 +367,11 @@ def _advance_monitoring(kite, symbol: str, st: dict, logger: PdfEntryLogger) -> 
             price = fill.get("average_price") if fill else st["t1"]
             hit_target = price is not None and abs(price - st["t1"]) <= abs(price - st["sl"])
             if hit_target:
-                new_floor = max(st["gtt2_floor"], st["t1"])
+                # Floor goes to the ORIGINAL BUY PRICE (breakeven), not T1 -- explicit
+                # instruction 2026-11-22: "protect my capital", not lock in the T1-level
+                # profit on the remaining half. Trailing (below) still applies from here
+                # onward, same as before -- this only changes where the floor STARTS.
+                new_floor = max(st["gtt2_floor"], st["avg_price"])
                 _raise_gtt2_floor(kite, symbol, st, new_floor, logger, reason="t1_hit")
                 logger.event("pdf_entry_t1_hit", symbol=symbol, half1_qty=st["half1_qty"],
                              t1=st["t1"], new_floor=new_floor, half2_qty=st["half2_qty"], t2=st["t2"])
