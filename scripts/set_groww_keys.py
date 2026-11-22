@@ -22,6 +22,10 @@ def ask(label: str, min_len: int) -> str:
     while True:
         raw = getpass.getpass(f"Paste {label} (hidden) then Enter: ")
         val = re.sub(r"\s+", "", raw)  # remove any spaces / line breaks from pasting
+        half = len(val) // 2
+        if len(val) % 2 == 0 and half >= 16 and val[:half] == val[half:]:
+            print(f"  that looks pasted TWICE ({len(val)} -> {half} characters); using one copy")
+            val = val[:half]
         if not val:
             print("  empty -- try again")
         elif not val.isascii():
