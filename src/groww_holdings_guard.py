@@ -21,7 +21,7 @@ import os
 import time as time_module
 from datetime import datetime
 
-from . import auth, groww_client, ntfy_notify, telegram_notify, yahoo_intraday
+from . import auth, groww_client, ntfy_notify, telegram_notify, yahoo_daily, yahoo_intraday
 from .swing_live import LOG_DIR, MARKET_CLOSE, MARKET_OPEN, PROJECT_ROOT, SwingLogger, _now
 
 STATE_FILE = PROJECT_ROOT / "groww_holdings_state.json"
@@ -34,6 +34,12 @@ POLL_INTERVAL_SECONDS = 60
 BREACH_POLLS = 2
 MAX_YAHOO_AGE_MINUTES = 25
 RELOGIN_AFTER_FAILURES = 3
+
+# Market-watch alerts (all holdings, not just the guarded ones). Checked every MONITOR_EVERY_SECONDS.
+MOVE_ALERT_PCT = float(os.getenv("GROWW_HOLDINGS_MOVE_PCT", "5"))
+VOLUME_MULTS = [float(x) for x in os.getenv("GROWW_HOLDINGS_VOLUME_MULTS", "1.5,2,3").split(",")]
+MONITOR_EVERY_SECONDS = 300
+ALERTS_FILE = PROJECT_ROOT / "groww_holdings_alerts.json"
 
 # Flip to True only after the CNC sell test (scripts.test_groww_cnc_holding_sell)
 # printed ACCEPTED on a trading day. Until then this guardian only alerts.
@@ -54,6 +60,7 @@ class HoldingsLogger(SwingLogger):
     NOTIFY_KINDS: set = set()
 
     def _push(self, kind: str, f: dict) -> None:
+        """Only: stop hit, sell sent, big move, volume surge, guardian stopped (+ CRITICAL via _notify)."""
         if self.notifier is None:
             return
         sym = f.get("symbol")
@@ -65,14 +72,15 @@ class HoldingsLogger(SwingLogger):
         elif kind == "holding_exit_sent":
             self.notifier(f"Sell order sent for {f['qty']} {sym} at ~{f['ltp']:.2f}. Check Groww orders.",
                           title=f"Sold {sym}?", priority="high")
-        elif kind == "holding_tracking_started":
-            self.notifier(f"Now guarding {sym}: {f['qty']} sh, price {f['ltp']:.2f}, stop {f['stop']:.2f}.",
-                          title=f"Guarding {sym}")
-        elif kind == "holding_dropped":
-            self.notifier(f"{sym} no longer has free quantity; stopped tracking.", title=f"Dropped {sym}")
-        elif kind == "start":
-            self.notifier(f"Holdings guardian up. {f.get('mode')}. Trail {f.get('trail_pct', 0) * 100:g}% ({f.get('trail_mode')}).",
-                          title="Holdings guard up")
+        elif kind == "holding_big_move":
+            arrow = "UP" if f["change_pct"] > 0 else "DOWN"
+            self.notifier(f"{sym} is {arrow} {abs(f['change_pct']):.1f}% today: {f['price']:.2f} "
+                          f"(prev close {f['prev_close']:.2f}).", title=f"{sym} {f['change_pct']:+.1f}%",
+                          priority="high")
+        elif kind == "holding_volume_surge":
+            self.notifier(f"{sym} volume today is {f['ratio']:.1f}x its 20-day average "
+                          f"({f['volume']:,.0f} vs {f['avg_volume']:,.0f}). Price {f['price']:.2f}.",
+                          title=f"{sym} volume {f['ratio']:.1f}x")
         elif kind == "end":
             self.notifier("Holdings guardian STOPPED.", title="Holdings guard down", priority="high", tags="warning")
 
@@ -114,6 +122,9 @@ def _num(x) -> float:
         return 0.0
 
 
+_all_symbols: list[str] = []
+
+
 def fetch_free_holdings(g) -> dict[str, dict] | None:
     """{symbol: {"qty": free qty, "avg": average price}} or None on fetch failure
     (never {} -- an API error must not look like 'you hold nothing')."""
@@ -123,6 +134,8 @@ def fetch_free_holdings(g) -> dict[str, dict] | None:
         print(f"WARNING: could not fetch Groww holdings: {exc!r}")
         return None
     rows = resp.get("holdings", []) if isinstance(resp, dict) else resp
+    global _all_symbols
+    _all_symbols = sorted({h["trading_symbol"] for h in rows if _num(h.get("quantity")) > 0})
     out = {}
     for h in rows:
         free = _num(h.get("demat_free_quantity"))
@@ -163,11 +176,109 @@ def fetch_prices(symbols: list[str], logger) -> tuple[dict[str, float], str]:
     return prices, "yahoo"
 
 
+def _load_alerts() -> dict:
+    try:
+        d = json.loads(ALERTS_FILE.read_text())
+        return d if d.get("date") == _now().date().isoformat() else {"date": _now().date().isoformat(), "sent": []}
+    except (OSError, ValueError):
+        return {"date": _now().date().isoformat(), "sent": []}
+
+
+_avg_vol_cache: dict[str, tuple[str, float]] = {}
+
+
+def avg_daily_volume(sym: str) -> float:
+    """Mean of the last 20 completed sessions' volume (Yahoo daily), cached per day. 0 if unknown."""
+    today = _now().date().isoformat()
+    hit = _avg_vol_cache.get(sym)
+    if hit and hit[0] == today:
+        return hit[1]
+    try:
+        df = yahoo_daily.fetch_daily(sym, days=60, use_cache=False)
+        vols = df[df.index.date < _now().date()]["Volume"].dropna().tail(20)
+        avg = float(vols.mean()) if len(vols) >= 5 else 0.0
+    except Exception as exc:  # noqa: BLE001
+        print(f"WARNING: avg volume for {sym} failed: {exc!r}")
+        avg = 0.0
+    _avg_vol_cache[sym] = (today, avg)
+    return avg
+
+
+def fetch_market_stats(symbols: list[str]) -> dict[str, dict]:
+    """{sym: {price, prev_close, volume}} -- Kite quotes if available, else Yahoo meta."""
+    global _kite
+    try:
+        _kite = auth.refresh_client_if_changed(_kite) if _kite else auth.get_kite()
+        q = _kite.quote([f"NSE:{s}" for s in symbols])
+        out = {}
+        for k, v in q.items():
+            ohlc = v.get("ohlc") or {}
+            if _num(v.get("last_price")) > 0 and _num(ohlc.get("close")) > 0:
+                out[k.split(":", 1)[1]] = {"price": _num(v["last_price"]), "prev_close": _num(ohlc["close"]),
+                                           "volume": _num(v.get("volume") or v.get("volume_traded"))}
+        if out:
+            return out
+    except Exception:  # noqa: BLE001
+        _kite = None
+    out, now = {}, _now().timestamp()
+    for s in symbols:
+        try:
+            r = yahoo_daily.chart_result(s, {"interval": "5m", "range": "1d"})
+        except Exception:  # noqa: BLE001
+            continue
+        meta = (r or {}).get("meta") or {}
+        price, prev = _num(meta.get("regularMarketPrice")), _num(meta.get("chartPreviousClose") or meta.get("previousClose"))
+        if price > 0 and prev > 0 and now - _num(meta.get("regularMarketTime")) <= MAX_YAHOO_AGE_MINUTES * 60:
+            out[s] = {"price": price, "prev_close": prev, "volume": _num(meta.get("regularMarketVolume"))}
+    return out
+
+
+def market_watch(symbols: list[str], logger: HoldingsLogger) -> None:
+    """Alert (once per day per stock/level) on a +-MOVE_ALERT_PCT move from prev close and on volume surges."""
+    alerts = _load_alerts()
+    sent = set(alerts["sent"])
+    for sym, st in fetch_market_stats(symbols).items():
+        change = (st["price"] / st["prev_close"] - 1) * 100
+        key = f"{sym}:move:{'up' if change > 0 else 'down'}"
+        if abs(change) >= MOVE_ALERT_PCT and key not in sent:
+            logger.event("holding_big_move", symbol=sym, price=st["price"], prev_close=st["prev_close"],
+                         change_pct=round(change, 2))
+            sent.add(key)
+        avg = avg_daily_volume(sym)
+        if avg > 0 and st["volume"] > 0:
+            ratio = st["volume"] / avg
+            for mult in sorted(VOLUME_MULTS):
+                vkey = f"{sym}:vol:{mult:g}"
+                if ratio >= mult and vkey not in sent:
+                    logger.event("holding_volume_surge", symbol=sym, ratio=ratio, volume=st["volume"],
+                                 avg_volume=avg, price=st["price"], level=mult)
+                    sent.add(vkey)
+                    # one message per poll per stock: mark lower tiers too
+                    sent.update(f"{sym}:vol:{m:g}" for m in VOLUME_MULTS if m <= mult)
+                    break
+    alerts["sent"] = sorted(sent)
+    try:
+        ALERTS_FILE.write_text(json.dumps(alerts))
+    except OSError as exc:
+        print(f"WARNING: could not save alerts file: {exc!r}")
+
+
+_last_watch = 0.0
+
+
 def check_once(g, state: dict[str, dict], logger: HoldingsLogger) -> bool:
     holdings = fetch_free_holdings(g)
     if holdings is None:
         logger.event("holding_poll_skipped_fetch_failed")
         return False
+
+    global _last_watch
+    if _all_symbols and time_module.monotonic() - _last_watch >= MONITOR_EVERY_SECONDS:
+        _last_watch = time_module.monotonic()
+        try:
+            market_watch(_all_symbols, logger)
+        except Exception as exc:  # noqa: BLE001 - watch alerts must never break the stops below
+            logger.event("market_watch_error", error=repr(exc))
 
     for sym in list(state):
         if sym not in holdings:
