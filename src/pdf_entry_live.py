@@ -45,16 +45,53 @@ live Kite credentials here) -- the very first real GTT placed on the VPS
 should be manually cross-checked in the Kite app before trusting this
 module unattended, exactly like every other live-API assumption in this
 project has been checked for real at least once.
+
+AUTO-ADOPT sub-flow (added 2026-11-22, explicit instruction): a SECOND,
+completely independent way a symbol enters Part 2 -- no PDF, no chat
+message, no pending_picks.json entry at all. The trader's own rule: "for
+part one I don't place a stop-loss myself -- so when you see a stock with
+one already placed, that means it's part two." Concretely: _scan_for_auto_
+adopt runs every poll, looking at every MTF holding not already tracked for
+a self-placed SINGLE-LEG stop-loss GTT (a plain SL, no target -- a two-leg
+GTT is a different thing entirely, see fetch_manual_gtt_info's own meaning
+in swing_live.py). The moment one is found:
+
+  1. It's immediately converted into a two-leg (OCO) GTT -- same SL, plus a
+     placeholder target far enough out that it should never realistically
+     fire (AUTO_PLACEHOLDER_TARGET_MULTIPLE). This is the trick that keeps
+     swing_live.py completely untouched: that file's own fetch_manual_gtt_
+     info only ever recognises TWO-LEG GTTs as "manually managed, stand
+     down" -- converting here means Part 1 stands down from the moment of
+     detection, with zero code changes anywhere else.
+  2. T1 = breakeven% + 2%, T2 = breakeven% + 5% (both above avg_price,
+     recomputed fresh every poll as days_held/funded_amount evolve -- same
+     formula shape as swing_live.py's own arm threshold, just a different
+     constant and reimplemented locally).
+  3. Nothing happens until price reaches T1. At T1, the full quantity is
+     split 50/50 into two GTTs: one actively trails 0.5% below peak, the
+     other sits pinned exactly at T1.
+  4. If the trailing half's stop fires BEFORE T2 is ever reached -- that's
+     a 50% partial sale. The other half stays pinned at T1 (a floor, not
+     actively trailing) until either it also gets stopped out there, or
+     price reaches T2, at which point trailing resumes on just that half.
+  5. If instead price reaches T2 WITHOUT the trailing half ever stopping
+     out -- no partial sale happens at all. Both halves merge back into one
+     full-quantity trailing bracket (floored at T2), and the eventual stop
+     sells the ENTIRE position in one exit instead of two half-exits.
+
+Every GTT-raise in this sub-flow is a cancel-and-replace, same pattern as
+the pick-based flow's _raise_gtt2_floor -- the floor can only ever rise.
 """
 
 import json
 import os
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from . import auth, heartbeat
 from .orders import PLACEMENT_EXCEPTIONS, PRODUCT_MTF
+from .swing_strategy import compute_mtf_breakeven_pct
 
 # A SEPARATE gate from config.LIVE_TRADING_ENABLED (which only ever means
 # "the existing exit-only guardians may place exit orders"). Even though
@@ -103,6 +140,31 @@ PHASE_MONITORING = "monitoring"
 PHASE_CLOSED = "closed"
 PHASE_ERROR = "error"
 
+# --- AUTO-ADOPT sub-flow (2026-11-22) -- a SECOND, independent way a symbol
+# enters Part 2, alongside the pick-based flow above. See _scan_for_auto_adopt's
+# own docstring for the full mechanics; these are its phases. ---
+PHASE_AUTO_WAITING_T1 = "auto_waiting_t1"
+PHASE_AUTO_STAGE1_SPLIT = "auto_stage1_split"
+PHASE_AUTO_PINNED_T1 = "auto_pinned_t1"
+PHASE_AUTO_STAGE2 = "auto_stage2"
+
+# Arm/target offsets ABOVE real breakeven (not raw avg_price) -- explicit
+# instruction 2026-11-22, deliberately mirroring swing_live.py's own
+# breakeven_pct + PROFIT_TARGET_PCT arm formula (same 2% figure), just
+# reimplemented locally so this file still imports nothing from swing_live.py.
+AUTO_T1_PCT = 0.02
+AUTO_T2_PCT = 0.05
+
+# The "target" leg of every auto-adopt OCO GTT is a placeholder that should
+# realistically never fire -- this flow's real sell decisions are always
+# made by THIS module raising the SL leg, never by the target leg. Recomputed
+# off the CURRENT ltp every time the GTT is replaced, so it's always this
+# much further out from wherever price actually is "right now", not stale.
+# NOT verified against Kite's own acceptance bounds for a GTT trigger this
+# far from LTP (no live credentials in this coding session) -- check the
+# first few real ones placed on the VPS actually accept this.
+AUTO_PLACEHOLDER_TARGET_MULTIPLE = 1.3
+
 TERMINAL_PHASES = {PHASE_CLOSED, PHASE_ERROR}
 
 
@@ -122,6 +184,12 @@ class PdfEntryLogger:
         "pdf_entry_t2_hit",
         "pdf_entry_sl_hit",
         "pdf_entry_error",
+        "pdf_entry_auto_detected",
+        "pdf_entry_auto_armed",
+        "pdf_entry_auto_partial_sell",
+        "pdf_entry_auto_t2_merge",
+        "pdf_entry_auto_t2_reactivate",
+        "pdf_entry_auto_remaining_closed",
     }
 
     def __init__(self, log_path: Path, notifier=None):
@@ -164,6 +232,20 @@ def _format_event(kind: str, fields: dict) -> str:
         return f"🛑 {sym}: stop-loss hit on {fields['qty']} shares near ₹{fields['price']:.2f}"
     if kind == "pdf_entry_error":
         return f"⚠️ {sym}: {fields.get('message', 'error')}"
+    if kind == "pdf_entry_auto_detected":
+        return (f"🔎 {sym}: found your own stop-loss (₹{fields['sl']}) on {fields['qty']} shares @ ₹{fields['avg_price']:.2f} -- "
+                f"adopting into Part 2, computing T1/T2 off breakeven now.")
+    if kind == "pdf_entry_auto_armed":
+        return (f"📈 {sym}: armed at T1 ₹{fields['t1']:.2f} -- trailing 0.5% on {fields['half1_qty']}+{fields['half2_qty']} shares "
+                f"toward T2 ₹{fields['t2']:.2f}")
+    if kind == "pdf_entry_auto_partial_sell":
+        return f"✅ {sym}: trailing stop hit before T2 -- sold {fields['qty']} shares near ₹{fields['price']:.2f}. Remaining shares now pinned at T1, waiting."
+    if kind == "pdf_entry_auto_t2_merge":
+        return f"🏆 {sym}: reached T2 ₹{fields['t2']:.2f} without a pullback -- all {fields['qty']} shares now trailing together, floor ₹{fields['floor']:.2f}"
+    if kind == "pdf_entry_auto_t2_reactivate":
+        return f"🏆 {sym}: remaining {fields['qty']} shares reached T2 ₹{fields['t2']:.2f} -- trailing resumed, floor ₹{fields['floor']:.2f}"
+    if kind == "pdf_entry_auto_remaining_closed":
+        return f"🏁 {sym}: {fields['qty']} shares closed near ₹{fields['price']:.2f} ({fields.get('reason', 'stopped out')}). Position fully closed."
     return f"{kind}: {fields}"
 
 
@@ -267,6 +349,133 @@ def _get_ltp(kite, symbol: str) -> float | None:
         return None
 
 
+def _funded_amount_for_auto(kite, symbol: str, quantity: int, avg_price: float) -> float | None:
+    """Independent reimplementation of swing_live.py's own
+    _funded_amount_for_position (same Kite order_margins technique) --
+    duplicated here, not imported, so this file keeps zero dependency on
+    swing_live.py. Returns None (never raises) on any failure; callers must
+    fall back to a flat offset rather than guess a funded amount."""
+    try:
+        result = kite.order_margins([{
+            "exchange": "NSE", "tradingsymbol": symbol, "transaction_type": "BUY",
+            "variety": "regular", "product": PRODUCT_MTF, "order_type": "MARKET",
+            "quantity": quantity, "price": 0, "trigger_price": 0,
+        }])
+        required_margin = float(result[0]["total"])
+    except PLACEMENT_EXCEPTIONS + (KeyError, IndexError, TypeError, ValueError):
+        return None
+    position_value = quantity * avg_price
+    return max(0.0, position_value - required_margin)
+
+
+def _breakeven_pct_for_auto(st: dict, today: date) -> float:
+    """Same fallback convention as swing_live.py's own _arm_threshold_pct:
+    if funded_amount couldn't be determined, skip the breakeven add-on
+    entirely (T1/T2 become a flat 2%/5% above avg_price) rather than guess."""
+    if st.get("funded_amount") is None:
+        return 0.0
+    days_held = max(0, (today - date.fromisoformat(st["entry_date"])).days)
+    position_value = st["avg_price"] * st["qty"]
+    return compute_mtf_breakeven_pct(position_value, st["funded_amount"], days_held)
+
+
+def _auto_t1_t2(st: dict, today: date) -> tuple[float, float]:
+    """T1 = breakeven% + 2%, T2 = breakeven% + 5%, both above avg_price --
+    explicit instruction 2026-11-22. Recomputed fresh every poll (not fixed
+    at detection time), same reasoning as swing_live.py's own
+    _arm_threshold_pct/_trail_pct_for: a carried position's real breakeven
+    rises with accrued MTF interest as days_held grows."""
+    bep = _breakeven_pct_for_auto(st, today)
+    avg = st["avg_price"]
+    return avg * (1 + bep + AUTO_T1_PCT), avg * (1 + bep + AUTO_T2_PCT)
+
+
+def _scan_for_auto_adopt(kite, state: dict[str, dict], logger: PdfEntryLogger) -> None:
+    """Looks for a brand-new MTF holding that already carries a self-placed
+    PLAIN stop-loss -- a single-leg GTT, SELL side, no target -- the signal
+    the trader chose explicitly 2026-11-22: "when I buy a stock, I simply
+    fix a stop loss... when you see a stock with a stop loss, it means it
+    falls in part 2." No PDF, no chat message, no pending_picks.json entry
+    needed at all for this path -- this scan alone is the detector.
+
+    The moment one is found, this converts it into an OCO GTT (same SL,
+    plus a far-out placeholder target that should never realistically fire
+    -- see AUTO_PLACEHOLDER_TARGET_MULTIPLE) BEFORE adding it to state.
+    That conversion is what makes swing_live.py's own fetch_manual_gtt_info
+    (which only recognises TWO-LEG GTTs as "manually managed, stand down")
+    correctly leave this symbol alone too -- with ZERO changes to that file
+    or any other part of the exit-only guardian. If the conversion fails,
+    nothing is added to state and the next scan just tries again -- simpler
+    and safer than a half-converted retry state sitting unprotected.
+
+    Runs every poll, at whatever the current poll interval happens to be
+    (this flow has no PICKS_FILE to signal "something is about to happen",
+    so there is no way to pre-emptively fast-poll for the moment the trader
+    places his own stop-loss -- the realistic detection lag is up to one
+    normal poll interval, same order of magnitude as every other gap this
+    module already documents)."""
+    try:
+        positions = kite.positions().get("net", [])
+    except PLACEMENT_EXCEPTIONS:
+        return
+    try:
+        all_gtts = kite.get_gtts()
+    except PLACEMENT_EXCEPTIONS:
+        return
+
+    single_leg_sl: dict[str, dict] = {}
+    for g in all_gtts:
+        if g.get("status") != "active" or g.get("type") != "single":
+            continue
+        cond = g.get("condition") or {}
+        symbol = cond.get("tradingsymbol")
+        values = cond.get("trigger_values") or []
+        order_legs = g.get("orders") or []
+        if not symbol or len(values) != 1 or len(order_legs) != 1:
+            continue
+        if order_legs[0].get("transaction_type") != "SELL":
+            continue
+        single_leg_sl[symbol] = {"trigger_id": g.get("id"), "sl": float(values[0])}
+
+    for pos in positions:
+        symbol = pos.get("tradingsymbol")
+        if pos.get("product") != PRODUCT_MTF or (pos.get("quantity") or 0) <= 0:
+            continue
+        existing = state.get(symbol)
+        if existing and existing["phase"] not in TERMINAL_PHASES:
+            continue  # already tracked (pick-based or auto) -- leave it alone
+        gtt_info = single_leg_sl.get(symbol)
+        if gtt_info is None:
+            continue  # no self-placed plain stop-loss -- not an auto-adopt candidate
+
+        qty = pos["quantity"]
+        avg_price = pos["average_price"]
+        ltp = _get_ltp(kite, symbol) or avg_price
+        placeholder = ltp * AUTO_PLACEHOLDER_TARGET_MULTIPLE
+        try:
+            new_gtt = _place_oco_gtt(kite, symbol, qty, gtt_info["sl"], placeholder, ltp)
+        except PLACEMENT_EXCEPTIONS as exc:
+            logger.event("pdf_entry_error", symbol=symbol,
+                         message=f"found a self-placed stop-loss but could not convert it to a standdown bracket: {exc}")
+            continue
+        try:
+            kite.delete_gtt(gtt_info["trigger_id"])
+        except PLACEMENT_EXCEPTIONS:
+            pass  # the old single-leg GTT may already be gone -- the new OCO above is what matters
+
+        state[symbol] = {
+            "source": "auto",
+            "phase": PHASE_AUTO_WAITING_T1,
+            "sl": gtt_info["sl"],
+            "qty": qty,
+            "avg_price": avg_price,
+            "funded_amount": _funded_amount_for_auto(kite, symbol, qty, avg_price),
+            "entry_date": _now().date().isoformat(),
+            "gtt_id": new_gtt,
+        }
+        logger.event("pdf_entry_auto_detected", symbol=symbol, sl=gtt_info["sl"], qty=qty, avg_price=avg_price)
+
+
 def _advance_awaiting_position(kite, symbol: str, st: dict, logger: PdfEntryLogger) -> None:
     pos = _find_mtf_position(kite, symbol)
     if pos is None:
@@ -358,6 +567,199 @@ def _raise_gtt2_floor(kite, symbol: str, st: dict, new_floor: float, logger: Pdf
         logger.event("pdf_entry_error", symbol=symbol, message=f"could not raise floor to {new_floor} ({reason}): {exc}")
 
 
+def _advance_auto_waiting_t1(kite, symbol: str, st: dict, logger: PdfEntryLogger) -> None:
+    """Waiting for price to reach T1 (breakeven% + 2%). The standdown OCO
+    placed at detection (SL = the trader's own stop, target = placeholder)
+    is left completely untouched until then -- nothing to do but watch."""
+    ltp = _get_ltp(kite, symbol)
+    if ltp is None:
+        return
+    today = _now().date()
+    t1, t2 = _auto_t1_t2(st, today)
+    if ltp < t1:
+        return
+
+    qty = st["qty"]
+    placeholder = ltp * AUTO_PLACEHOLDER_TARGET_MULTIPLE
+    if qty == 1:
+        # Can't split a single share -- skip straight to a single trailing
+        # bracket covering the whole (1-share) position, floored at T1.
+        try:
+            new_gtt = _place_oco_gtt(kite, symbol, 1, t1, placeholder, ltp)
+        except PLACEMENT_EXCEPTIONS as exc:
+            logger.event("pdf_entry_error", symbol=symbol, message=f"could not arm trailing at T1: {exc}")
+            return
+        try:
+            kite.delete_gtt(st["gtt_id"])
+        except PLACEMENT_EXCEPTIONS:
+            pass
+        st["gtt_id"] = new_gtt
+        st["gtt_qty"] = 1
+        st["floor"] = t1
+        st["peak"] = ltp
+        st["phase"] = PHASE_AUTO_STAGE2
+        logger.event("pdf_entry_auto_armed", symbol=symbol, t1=t1, t2=t2, half1_qty=0, half2_qty=1)
+        return
+
+    half1 = qty // 2
+    half2 = qty - half1
+    try:
+        gttA = _place_oco_gtt(kite, symbol, half1, t1, placeholder, ltp)
+        gttB = _place_oco_gtt(kite, symbol, half2, t1, placeholder, ltp)
+    except PLACEMENT_EXCEPTIONS as exc:
+        logger.event("pdf_entry_error", symbol=symbol, message=f"could not arm trailing at T1: {exc}")
+        return
+    try:
+        kite.delete_gtt(st["gtt_id"])
+    except PLACEMENT_EXCEPTIONS:
+        pass
+    st["gttA_id"] = gttA
+    st["gttA_qty"] = half1
+    st["gttA_floor"] = t1
+    st["gttB_id"] = gttB
+    st["gttB_qty"] = half2
+    st["peak"] = max(t1, ltp)
+    st["phase"] = PHASE_AUTO_STAGE1_SPLIT
+    logger.event("pdf_entry_auto_armed", symbol=symbol, t1=t1, t2=t2, half1_qty=half1, half2_qty=half2)
+
+
+def _advance_auto_stage1_split(kite, symbol: str, st: dict, logger: PdfEntryLogger) -> None:
+    """Between T1 and T2: GTT A (half the qty) actively trails 0.5% below
+    peak; GTT B (the other half) sits pinned at T1, untouched. Whichever
+    fires first decides what happens next -- see this module's own
+    docstring for the full state machine."""
+    today = _now().date()
+    t1, t2 = _auto_t1_t2(st, today)
+
+    gttA = _gtt_status(kite, st["gttA_id"])
+    if gttA is not None and gttA.get("status") == kite.GTT_STATUS_TRIGGERED:
+        fill = _find_recent_sell_fill(kite, symbol, st["gttA_qty"])
+        price = fill.get("average_price") if fill else st["gttA_floor"]
+        logger.event("pdf_entry_auto_partial_sell", symbol=symbol, qty=st["gttA_qty"], price=price)
+        st["gttA_id"] = None
+        st["phase"] = PHASE_AUTO_PINNED_T1
+        return
+
+    gttB = _gtt_status(kite, st["gttB_id"])
+    if gttB is not None and gttB.get("status") == kite.GTT_STATUS_TRIGGERED:
+        # Defensive only -- a severe gap took the PINNED-at-T1 half out
+        # before GTT A's own (higher) trailing floor ever fired. Treat the
+        # whole position as closed; GTT A is cancelled, not filled.
+        fill = _find_recent_sell_fill(kite, symbol, st["gttB_qty"])
+        price = fill.get("average_price") if fill else t1
+        try:
+            kite.delete_gtt(st["gttA_id"])
+        except PLACEMENT_EXCEPTIONS:
+            pass
+        logger.event("pdf_entry_auto_remaining_closed", symbol=symbol, qty=st["qty"], price=price, reason="gap through T1")
+        st["phase"] = PHASE_CLOSED
+        return
+
+    ltp = _get_ltp(kite, symbol)
+    if ltp is None:
+        return
+    st["peak"] = max(st.get("peak", t1), ltp)
+
+    if st["peak"] >= t2:
+        # Reached T2 without ever pulling back -- merge the two halves back
+        # into ONE full-qty trailing bracket, exactly per the trader's
+        # clarification: no partial sale in this path, a single future exit.
+        total_qty = st["gttA_qty"] + st["gttB_qty"]
+        new_floor = max(t2, st["gttA_floor"])
+        placeholder = ltp * AUTO_PLACEHOLDER_TARGET_MULTIPLE
+        try:
+            merged = _place_oco_gtt(kite, symbol, total_qty, new_floor, placeholder, ltp)
+        except PLACEMENT_EXCEPTIONS as exc:
+            logger.event("pdf_entry_error", symbol=symbol, message=f"could not merge into full trailing at T2: {exc}")
+            return
+        for gid in (st["gttA_id"], st["gttB_id"]):
+            try:
+                kite.delete_gtt(gid)
+            except PLACEMENT_EXCEPTIONS:
+                pass
+        st["gtt_id"] = merged
+        st["gtt_qty"] = total_qty
+        st["floor"] = new_floor
+        st["phase"] = PHASE_AUTO_STAGE2
+        logger.event("pdf_entry_auto_t2_merge", symbol=symbol, qty=total_qty, floor=new_floor, t2=t2)
+        return
+
+    new_floor = max(st["gttA_floor"], st["peak"] * (1 - TRAIL_PCT))
+    if new_floor > st["gttA_floor"]:
+        placeholder = ltp * AUTO_PLACEHOLDER_TARGET_MULTIPLE
+        try:
+            kite.delete_gtt(st["gttA_id"])
+            st["gttA_id"] = _place_oco_gtt(kite, symbol, st["gttA_qty"], new_floor, placeholder, ltp)
+            st["gttA_floor"] = new_floor
+        except PLACEMENT_EXCEPTIONS as exc:
+            logger.event("pdf_entry_error", symbol=symbol, message=f"could not raise stage-1 trailing floor: {exc}")
+
+
+def _advance_auto_pinned_t1(kite, symbol: str, st: dict, logger: PdfEntryLogger) -> None:
+    """The remaining half, parked statically at T1 after the first partial
+    sale -- not trailing yet. Either it gets stopped out right here (a solid
+    win either way, since half was already booked at T1), or price reaches
+    T2 and trailing resumes."""
+    today = _now().date()
+    t1, t2 = _auto_t1_t2(st, today)
+    gttB = _gtt_status(kite, st["gttB_id"])
+    if gttB is not None and gttB.get("status") == kite.GTT_STATUS_TRIGGERED:
+        fill = _find_recent_sell_fill(kite, symbol, st["gttB_qty"])
+        price = fill.get("average_price") if fill else t1
+        logger.event("pdf_entry_auto_remaining_closed", symbol=symbol, qty=st["gttB_qty"], price=price, reason="pinned at T1, stopped out")
+        st["gttB_id"] = None
+        st["phase"] = PHASE_CLOSED
+        return
+    ltp = _get_ltp(kite, symbol)
+    if ltp is None:
+        return
+    if ltp >= t2:
+        placeholder = ltp * AUTO_PLACEHOLDER_TARGET_MULTIPLE
+        try:
+            new_gtt = _place_oco_gtt(kite, symbol, st["gttB_qty"], t1, placeholder, ltp)
+        except PLACEMENT_EXCEPTIONS as exc:
+            logger.event("pdf_entry_error", symbol=symbol, message=f"could not reactivate trailing past T2: {exc}")
+            return
+        try:
+            kite.delete_gtt(st["gttB_id"])
+        except PLACEMENT_EXCEPTIONS:
+            pass
+        st["gtt_id"] = new_gtt
+        st["gtt_qty"] = st["gttB_qty"]
+        st["floor"] = t1
+        st["peak"] = ltp
+        st["phase"] = PHASE_AUTO_STAGE2
+        logger.event("pdf_entry_auto_t2_reactivate", symbol=symbol, qty=st["gttB_qty"], floor=t1, t2=t2)
+
+
+def _advance_auto_stage2(kite, symbol: str, st: dict, logger: PdfEntryLogger) -> None:
+    """One GTT, continuously raised 0.5% below peak -- covers BOTH 'ran
+    straight through T2' (full original qty) and 'already took a partial
+    exit, now past T2 too' (the remaining half) identically; st["gtt_qty"]
+    and st["floor"] already encode which case this is."""
+    gtt = _gtt_status(kite, st["gtt_id"])
+    if gtt is not None and gtt.get("status") == kite.GTT_STATUS_TRIGGERED:
+        fill = _find_recent_sell_fill(kite, symbol, st["gtt_qty"])
+        price = fill.get("average_price") if fill else st["floor"]
+        logger.event("pdf_entry_auto_remaining_closed", symbol=symbol, qty=st["gtt_qty"], price=price, reason="stage-2 trailing stop")
+        st["gtt_id"] = None
+        st["phase"] = PHASE_CLOSED
+        return
+    ltp = _get_ltp(kite, symbol)
+    if ltp is None:
+        return
+    st["peak"] = max(st.get("peak", st["floor"]), ltp)
+    new_floor = max(st["floor"], st["peak"] * (1 - TRAIL_PCT))
+    if new_floor > st["floor"]:
+        placeholder = ltp * AUTO_PLACEHOLDER_TARGET_MULTIPLE
+        try:
+            kite.delete_gtt(st["gtt_id"])
+            st["gtt_id"] = _place_oco_gtt(kite, symbol, st["gtt_qty"], new_floor, placeholder, ltp)
+            st["floor"] = new_floor
+        except PLACEMENT_EXCEPTIONS as exc:
+            logger.event("pdf_entry_error", symbol=symbol, message=f"could not raise stage-2 trailing floor: {exc}")
+
+
 def _advance_monitoring(kite, symbol: str, st: dict, logger: PdfEntryLogger) -> None:
     # --- half1 (T1 bracket), only if it exists ---
     if st["gtt1_id"] and st["half1_qty"]:
@@ -419,6 +821,7 @@ def check_once(kite, state: dict[str, dict], logger: PdfEntryLogger) -> bool:
     caller uses this to decide whether to poll again at FAST_POLL_INTERVAL_SECONDS
     instead of the normal POLL_INTERVAL_SECONDS (see run_pdf_entry_bot)."""
     _consume_pending_picks(state, logger)
+    _scan_for_auto_adopt(kite, state, logger)
     needs_fast_poll = False
     for symbol, st in list(state.items()):
         phase = st["phase"]
@@ -432,6 +835,14 @@ def check_once(kite, state: dict[str, dict], logger: PdfEntryLogger) -> bool:
                 needs_fast_poll = True
         elif phase == PHASE_MONITORING:
             _advance_monitoring(kite, symbol, st, logger)
+        elif phase == PHASE_AUTO_WAITING_T1:
+            _advance_auto_waiting_t1(kite, symbol, st, logger)
+        elif phase == PHASE_AUTO_STAGE1_SPLIT:
+            _advance_auto_stage1_split(kite, symbol, st, logger)
+        elif phase == PHASE_AUTO_PINNED_T1:
+            _advance_auto_pinned_t1(kite, symbol, st, logger)
+        elif phase == PHASE_AUTO_STAGE2:
+            _advance_auto_stage2(kite, symbol, st, logger)
     save_state(state)
     return needs_fast_poll
 
