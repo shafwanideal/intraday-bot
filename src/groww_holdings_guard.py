@@ -21,7 +21,7 @@ import os
 import time as time_module
 from datetime import datetime
 
-from . import auth, groww_client, ntfy_notify, yahoo_intraday
+from . import auth, groww_client, ntfy_notify, telegram_notify, yahoo_intraday
 from .swing_live import LOG_DIR, MARKET_CLOSE, MARKET_OPEN, PROJECT_ROOT, SwingLogger, _now
 
 STATE_FILE = PROJECT_ROOT / "groww_holdings_state.json"
@@ -86,6 +86,17 @@ class HoldingsLogger(SwingLogger):
     def _notify(self, text: str) -> None:
         if self.notifier is not None:
             self.notifier(text, title="Holdings guard CRITICAL", priority="urgent", tags="rotating_light")
+
+
+def notify(text: str, title: str = "Holdings guard", priority: str = "default", tags: str = "") -> None:
+    """Push to every channel that is configured: Telegram and/or ntfy. Never raises."""
+    try:
+        if telegram_notify.enabled():
+            icon = "\U0001F6A8 " if priority in {"urgent", "high"} else ""
+            telegram_notify.send_message(f"{icon}{title}\n{text}")
+    except Exception as exc:  # noqa: BLE001
+        print(f"WARNING: telegram push failed: {exc!r}")
+    ntfy_notify.send(text, title=title, priority=priority, tags=tags)
 
 
 def load_state() -> dict[str, dict]:
@@ -224,7 +235,7 @@ def check_once(g, state: dict[str, dict], logger: HoldingsLogger) -> bool:
 def run_guardian(poll_interval: int = POLL_INTERVAL_SECONDS) -> None:
     g = groww_client.get_groww()
     logger = HoldingsLogger(LOG_DIR / f"groww_holdings_{_now().date().isoformat()}.jsonl",
-                            notifier=ntfy_notify.send if ntfy_notify.enabled() else None)
+                            notifier=notify if (telegram_notify.enabled() or ntfy_notify.enabled()) else None)
     state = load_state()
     mode = "LIVE SELLS" if live_sells_enabled() else "ALERT-ONLY (no orders)"
     logger.event("start", mode=mode, trail_pct=TRAIL_PCT, trail_mode=TRAIL_MODE, tracked=list(state))
