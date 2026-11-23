@@ -134,6 +134,19 @@ TRAIL_PCT = 0.005
 # even if price gaps slightly past the trigger before the resting order posts.
 GTT_FILL_BUFFER_PCT = 0.003
 
+# NSE requires every order/trigger price to be a multiple of this (confirmed
+# for real 2026-11-23 -- Kite rejected a live GTT with "Target trigger price
+# should be a multiple of tick size 0.05"/"Stoploss limit price should be a
+# multiple of tick size 0.05"). Every price this module computes (breakeven-
+# based SL/T1/T2, trailing floors, the placeholder target) is an arbitrary
+# float, so EVERY price handed to Kite must be snapped to this grid -- see
+# _round_to_tick, applied once, centrally, inside _place_oco_gtt.
+TICK_SIZE = 0.05
+
+
+def _round_to_tick(price: float) -> float:
+    return round(round(price / TICK_SIZE) * TICK_SIZE, 2)
+
 PHASE_AWAITING_POSITION = "awaiting_position"
 PHASE_AWAITING_EXIT_SETUP = "awaiting_exit_setup"
 PHASE_MONITORING = "monitoring"
@@ -492,8 +505,10 @@ def _advance_awaiting_position(kite, symbol: str, st: dict, logger: PdfEntryLogg
 
 
 def _place_oco_gtt(kite, symbol: str, qty: int, sl: float, target: float, ltp: float):
-    sl_price = round(sl * (1 - GTT_FILL_BUFFER_PCT), 2)
-    target_price = round(target * (1 - GTT_FILL_BUFFER_PCT), 2)
+    sl = _round_to_tick(sl)
+    target = _round_to_tick(target)
+    sl_price = _round_to_tick(sl * (1 - GTT_FILL_BUFFER_PCT))
+    target_price = _round_to_tick(target * (1 - GTT_FILL_BUFFER_PCT))
     resp = kite.place_gtt(
         trigger_type=kite.GTT_TYPE_OCO,
         tradingsymbol=symbol,
