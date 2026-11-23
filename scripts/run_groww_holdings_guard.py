@@ -7,7 +7,18 @@ import sys
 
 from src import groww_client, groww_holdings_guard as m
 
-if "--status" in sys.argv:
+if "--test-alerts" in sys.argv:
+    from src import ntfy_notify, telegram_notify
+    print(f"Telegram configured: {telegram_notify.enabled()} | ntfy configured: {ntfy_notify.enabled()}")
+    L = m.HoldingsLogger(m.LOG_DIR / "alert_samples.jsonl", notifier=m.notify)
+    L._push("holding_stop_hit", dict(symbol="SAMPLE", qty=100, ltp=329.09, stop=329.1, peak=338.05, avg=298.59, gain_pct=10.2))
+    L._push("holding_exit_sent", dict(symbol="SAMPLE", qty=100, ltp=329.09))
+    L._push("holding_rebuy_signal", dict(symbol="SAMPLE", price=328.0, sell_price=329.09))
+    L._push("holding_big_move", dict(symbol="SAMPLE", price=313.5, prev_close=298.59, change_pct=5.0))
+    L._push("holding_volume_surge", dict(symbol="SAMPLE", ratio=2.1, volume=210000, avg_volume=100000, price=313.5))
+    L._notify("SAMPLE: this is what an error alert looks like.")
+    print("Sent 6 sample alerts (all marked SAMPLE). Check Telegram.")
+elif "--status" in sys.argv:
     g = groww_client.get_groww()
     h = m.fetch_free_holdings(g)
     state = m.load_state()
