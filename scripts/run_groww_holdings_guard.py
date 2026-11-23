@@ -7,10 +7,44 @@ import sys
 
 from src import groww_client, groww_holdings_guard as m
 
-if "--list" in sys.argv:
+if "--test-alerts" in sys.argv:
+    from src import ntfy_notify, telegram_notify
+    print(f"Telegram configured: {telegram_notify.enabled()} | ntfy configured: {ntfy_notify.enabled()}")
+    L = m.HoldingsLogger(m.LOG_DIR / "alert_samples.jsonl", notifier=m.notify)
+    L._push("holding_stop_hit", dict(symbol="SAMPLE", qty=100, ltp=329.09, stop=329.1, peak=338.05, avg=298.59, gain_pct=10.2))
+    L._push("holding_exit_sent", dict(symbol="SAMPLE", qty=100, ltp=329.09))
+    L._push("holding_rebuy_signal", dict(symbol="SAMPLE", price=328.0, sell_price=329.09))
+    L._push("holding_big_move", dict(symbol="SAMPLE", price=313.5, prev_close=298.59, change_pct=5.0))
+    L._push("holding_volume_surge", dict(symbol="SAMPLE", ratio=2.1, volume=210000, avg_volume=100000, price=313.5))
+    L._notify("SAMPLE: this is what an error alert looks like.")
+    print("Sent 6 sample alerts (all marked SAMPLE). Check Telegram.")
+elif "--status" in sys.argv:
     g = groww_client.get_groww()
     h = m.fetch_free_holdings(g)
-    print(f"Trail {m.TRAIL_PCT * 100:g}% ({m.TRAIL_MODE}) | live sells: {m.live_sells_enabled()}")
+    state = m.load_state()
+    if not h:
+        raise SystemExit("Nothing guardable right now (no free quantity), or the fetch failed.")
+
+    class _Q:  # fetch_prices only logs stale Yahoo prices through this
+        def event(self, *a, **k):
+            pass
+    prices, source = m.fetch_prices(list(h), _Q())
+    print(f"Prices from {source}. Trail {m.TRAIL_PCT * 100:g} pts, tightens to {m.TIGHT_TRAIL * 100:g} pts once a peak return reaches +{m.TIGHT_ARM * 100:g}%.")
+    print(f"{'SYMBOL':<11}{'QTY':>6}{'AVG':>9}{'PRICE':>9}{'RETURN':>8}{'PEAK':>9}{'STOP':>9}{'TO STOP':>9}  MODE")
+    for sym, v in h.items():
+        px = prices.get(sym)
+        st = state.get(sym) or {}
+        peak = max(st.get("peak") or 0, px or 0)
+        if not px or not peak:
+            print(f"{sym:<11}{v['qty']:>6}{v['avg']:>9.2f}  (no price yet)")
+            continue
+        stop = m.stop_price(peak, v["avg"])
+        mode = "LIVE SELL" if m.live_sells_enabled(sym) else "alert only"
+        print(f"{sym:<11}{v['qty']:>6}{v['avg']:>9.2f}{px:>9.2f}{(px / v['avg'] - 1) * 100:>7.1f}%{peak:>9.2f}{stop:>9.2f}{(px / stop - 1) * 100:>8.1f}%  {mode}")
+elif "--list" in sys.argv:
+    g = groww_client.get_groww()
+    h = m.fetch_free_holdings(g)
+    print(f"Trail {m.TRAIL_PCT * 100:g}% ({m.TRAIL_MODE}) | live sells: {sorted(x for x in m.WATCH_SYMBOLS if m.live_sells_enabled(x)) or "none"}")
     if not h:
         print("Nothing guardable (no free quantity), or the fetch failed.")
     for sym, v in (h or {}).items():

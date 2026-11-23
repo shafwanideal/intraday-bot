@@ -30,6 +30,15 @@ TRAIL_PCT = float(os.getenv("GROWW_HOLDINGS_TRAIL_PCT", "0.10"))
 # trails by 10 percentage points of your return (avg 100, peak 130 -> stop 120).
 # "price": the stop sits TRAIL_PCT of the PEAK PRICE below the peak (peak 130 -> stop 117).
 TRAIL_MODE = os.getenv("GROWW_HOLDINGS_TRAIL_MODE", "returns").lower()
+# Once a stock's PEAK return reaches TIGHT_ARM (+10%) the trail tightens from TRAIL_PCT (10 points)
+# to TIGHT_TRAIL (3 points) to lock the profit in.
+TIGHT_ARM = float(os.getenv("GROWW_HOLDINGS_TIGHT_ARM", "0.10"))
+TIGHT_TRAIL = float(os.getenv("GROWW_HOLDINGS_TIGHT_TRAIL", "0.03"))
+# Only these delivery holdings are guarded / watched.
+WATCH_SYMBOLS = {x.strip().upper() for x in os.getenv("GROWW_HOLDINGS_SYMBOLS", "MILKYMIST,GROWW,LALITHAA").split(",") if x.strip()}
+# After a sale, alert when the price falls below the sell price (minus this buffer; 0 = just below).
+REBUY_BUFFER_PCT = float(os.getenv("GROWW_REBUY_BUFFER_PCT", "0")) / 100
+REBUY_FILE = PROJECT_ROOT / "groww_rebuy_watch.json"
 POLL_INTERVAL_SECONDS = 60
 BREACH_POLLS = 2
 MAX_YAHOO_AGE_MINUTES = 25
@@ -41,19 +50,23 @@ VOLUME_MULTS = [float(x) for x in os.getenv("GROWW_HOLDINGS_VOLUME_MULTS", "1.5,
 MONITOR_EVERY_SECONDS = 300
 ALERTS_FILE = PROJECT_ROOT / "groww_holdings_alerts.json"
 
-# Flip to True only after the CNC sell test (scripts.test_groww_cnc_holding_sell)
-# printed ACCEPTED on a trading day. Until then this guardian only alerts.
-API_CAN_SELL_CNC = False
+# True since 2026-11-23: scripts.test_groww_cnc_holding_sell printed ACCEPTED (Groww's API takes a
+# CNC SELL of a free delivery holding). Real sells ALSO need GROWW_HOLDINGS_LIVE_SELLS=true in .env
+# and the symbol to be in LIVE_SELL_SYMBOLS; everything else only alerts.
+API_CAN_SELL_CNC = True
+LIVE_SELL_SYMBOLS = {x.strip().upper() for x in os.getenv("GROWW_HOLDINGS_LIVE_SYMBOLS", "MILKYMIST,LALITHAA").split(",") if x.strip()}
 
 
 def stop_price(peak: float, avg: float) -> float:
+    pts = TIGHT_TRAIL if (avg > 0 and peak / avg - 1 >= TIGHT_ARM) else TRAIL_PCT
     if TRAIL_MODE == "returns" and avg > 0:
-        return max(0.0, peak - TRAIL_PCT * avg)
-    return peak * (1 - TRAIL_PCT)
+        return max(0.0, peak - pts * avg)
+    return peak * (1 - pts)
 
 
-def live_sells_enabled() -> bool:
-    return API_CAN_SELL_CNC and os.getenv("GROWW_HOLDINGS_LIVE_SELLS", "").lower() == "true"
+def live_sells_enabled(sym: str | None = None) -> bool:
+    on = API_CAN_SELL_CNC and os.getenv("GROWW_HOLDINGS_LIVE_SELLS", "").lower() == "true"
+    return on and (sym is None or sym.upper() in LIVE_SELL_SYMBOLS)
 
 
 class HoldingsLogger(SwingLogger):
@@ -67,8 +80,13 @@ class HoldingsLogger(SwingLogger):
         if kind == "holding_stop_hit":
             self.notifier(
                 f"STOP HIT {sym}: price {f['ltp']:.2f} <= stop {f['stop']:.2f} (peak {f['peak']:.2f}, "
-                f"{f['gain_pct']:+.1f}% vs your avg). SELL {f['qty']} in the Groww app now.",
+                f"{f['gain_pct']:+.1f}% vs your avg). SELL {f['qty']} in the Groww app now. "
+                f"Sell price noted: {f['ltp']:.2f}; I'll tell you if it falls below that.",
                 title=f"SELL {sym} NOW", priority="urgent", tags="warning")
+        elif kind == "holding_rebuy_signal":
+            self.notifier(f"{sym} has fallen BELOW your sell price {f['sell_price']:.2f}: now {f['price']:.2f} "
+                          f"({(f['price'] / f['sell_price'] - 1) * 100:+.1f}%). Buy again if you still want it.",
+                          title=f"BUY AGAIN? {sym}", priority="high")
         elif kind == "holding_exit_sent":
             self.notifier(f"Sell order sent for {f['qty']} {sym} at ~{f['ltp']:.2f}. Check Groww orders.",
                           title=f"Sold {sym}?", priority="high")
@@ -101,10 +119,47 @@ def notify(text: str, title: str = "Holdings guard", priority: str = "default", 
     try:
         if telegram_notify.enabled():
             icon = "\U0001F6A8 " if priority in {"urgent", "high"} else ""
-            telegram_notify.send_message(f"{icon}{title}\n{text}")
+            telegram_notify.send_message(f"{icon}[Groww] {title}\n{text}")
     except Exception as exc:  # noqa: BLE001
         print(f"WARNING: telegram push failed: {exc!r}")
     ntfy_notify.send(text, title=title, priority=priority, tags=tags)
+
+
+def load_rebuy() -> dict[str, dict]:
+    try:
+        return json.loads(REBUY_FILE.read_text())
+    except (OSError, ValueError):
+        return {}
+
+
+def save_rebuy(rebuy: dict[str, dict]) -> None:
+    try:
+        REBUY_FILE.write_text(json.dumps(rebuy, indent=2))
+    except OSError as exc:
+        print(f"WARNING: could not save rebuy file: {exc!r}")
+
+
+def rebuy_watch(holdings: dict[str, dict], logger) -> None:
+    """After a sale, tell the user when the price falls below the sell price. Notify only -- never buys."""
+    rebuy = load_rebuy()
+    if not rebuy:
+        return
+    changed = False
+    for sym in list(rebuy):
+        if sym in holdings:  # you bought it again -> nothing left to watch
+            del rebuy[sym]
+            changed = True
+    todo = [sym for sym, r in rebuy.items() if not r.get("notified")]
+    if todo:
+        prices, source = fetch_prices(todo, logger)
+        for sym in todo:
+            ltp, r = prices.get(sym), rebuy[sym]
+            if ltp is not None and ltp < r["sell_price"] * (1 - REBUY_BUFFER_PCT):
+                logger.event("holding_rebuy_signal", symbol=sym, price=ltp, sell_price=r["sell_price"],
+                             qty=r.get("qty"), source=source)
+                r["notified"], changed = True, True
+    if changed:
+        save_rebuy(rebuy)
 
 
 def load_state() -> dict[str, dict]:
@@ -135,6 +190,7 @@ def fetch_free_holdings(g) -> dict[str, dict] | None:
         return None
     rows = resp.get("holdings", []) if isinstance(resp, dict) else resp
     global _all_symbols
+    rows = [h for h in rows if h.get("trading_symbol", "").upper() in WATCH_SYMBOLS]
     _all_symbols = sorted({h["trading_symbol"] for h in rows if _num(h.get("quantity")) > 0})
     out = {}
     for h in rows:
@@ -283,7 +339,15 @@ def check_once(g, state: dict[str, dict], logger: HoldingsLogger) -> bool:
     for sym in list(state):
         if sym not in holdings:
             logger.event("holding_dropped", symbol=sym)
+            sell_price = state[sym].get("sell_price") or state[sym].get("last_ltp")
+            if sell_price:  # note the sell price so we can tell you when it is cheaper again
+                rebuy = load_rebuy()
+                rebuy[sym] = {"sell_price": sell_price, "qty": state[sym].get("qty"),
+                              "since": _now().isoformat(), "notified": False}
+                save_rebuy(rebuy)
+                logger.event("holding_sell_noted", symbol=sym, sell_price=sell_price)
             del state[sym]
+    rebuy_watch(holdings, logger)
     if not holdings:
         return True
 
@@ -308,10 +372,11 @@ def check_once(g, state: dict[str, dict], logger: HoldingsLogger) -> bool:
                 st["exit_warned"] = True
             continue
 
-        st["peak"] = max(st["peak"], ltp)
+        st["peak"], st["last_ltp"], st["qty"] = max(st["peak"], ltp), ltp, h["qty"]
         stop = stop_price(st["peak"], h["avg"])
         if ltp > stop:
             st["breach"], st["alerted"] = 0, False
+            st.pop("sell_price", None)  # recovered above the stop: a later sale gets a fresh price
             continue
         st["breach"] += 1
         if st["breach"] < BREACH_POLLS:
@@ -321,7 +386,8 @@ def check_once(g, state: dict[str, dict], logger: HoldingsLogger) -> bool:
         gain_pct = (ltp / h["avg"] - 1) * 100 if h["avg"] else 0.0
         info = dict(symbol=sym, qty=h["qty"], ltp=ltp, stop=round(stop, 2), peak=st["peak"],
                     avg=h["avg"], gain_pct=gain_pct, source=source)
-        if not live_sells_enabled():
+        st["sell_price"] = ltp
+        if not live_sells_enabled(sym):
             if not st["alerted"]:
                 logger.event("holding_stop_hit", **info)
                 st["alerted"] = True
@@ -348,8 +414,10 @@ def run_guardian(poll_interval: int = POLL_INTERVAL_SECONDS) -> None:
     logger = HoldingsLogger(LOG_DIR / f"groww_holdings_{_now().date().isoformat()}.jsonl",
                             notifier=notify if (telegram_notify.enabled() or ntfy_notify.enabled()) else None)
     state = load_state()
-    mode = "LIVE SELLS" if live_sells_enabled() else "ALERT-ONLY (no orders)"
-    logger.event("start", mode=mode, trail_pct=TRAIL_PCT, trail_mode=TRAIL_MODE, tracked=list(state))
+    live = sorted(x for x in WATCH_SYMBOLS if live_sells_enabled(x))
+    mode = f"LIVE SELLS for {live}; others alert-only" if live else "ALERT-ONLY (no orders)"
+    logger.event("start", mode=mode, trail_pct=TRAIL_PCT, tight_arm=TIGHT_ARM, tight_trail=TIGHT_TRAIL,
+                 trail_mode=TRAIL_MODE, symbols=sorted(WATCH_SYMBOLS), tracked=list(state))
     failures, login_date = 0, _now().date()
     try:
         while True:
