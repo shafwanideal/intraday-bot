@@ -1,0 +1,19 @@
+"""Set one NON-secret .env setting.  .venv/bin/python -m scripts.set_env_flag NAME VALUE"""
+import os
+import re
+import sys
+import tempfile
+from pathlib import Path
+
+ENV = Path(__file__).resolve().parent.parent / ".env"
+if len(sys.argv) != 3 or not re.fullmatch(r"[A-Z][A-Z0-9_]*", sys.argv[1]) or not re.fullmatch(r"[A-Za-z0-9_.,-]*", sys.argv[2]):
+    raise SystemExit("Usage: python -m scripts.set_env_flag NAME VALUE   (plain value only)")
+name, val = sys.argv[1], sys.argv[2]
+lines = [ln for ln in (ENV.read_text().splitlines() if ENV.exists() else []) if ln.split("=", 1)[0].strip() != name]
+lines.append(f"{name}={val}")
+fd, tmp = tempfile.mkstemp(dir=ENV.parent, prefix=".env.")
+with os.fdopen(fd, "w") as f:
+    f.write("\n".join(lines) + "\n")
+os.chmod(tmp, 0o600)
+os.replace(tmp, ENV)
+print(f"Saved {name}={val}")

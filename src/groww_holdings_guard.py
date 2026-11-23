@@ -50,9 +50,11 @@ VOLUME_MULTS = [float(x) for x in os.getenv("GROWW_HOLDINGS_VOLUME_MULTS", "1.5,
 MONITOR_EVERY_SECONDS = 300
 ALERTS_FILE = PROJECT_ROOT / "groww_holdings_alerts.json"
 
-# Flip to True only after the CNC sell test (scripts.test_groww_cnc_holding_sell)
-# printed ACCEPTED on a trading day. Until then this guardian only alerts.
-API_CAN_SELL_CNC = False
+# True since 2026-11-23: scripts.test_groww_cnc_holding_sell printed ACCEPTED (Groww's API takes a
+# CNC SELL of a free delivery holding). Real sells ALSO need GROWW_HOLDINGS_LIVE_SELLS=true in .env
+# and the symbol to be in LIVE_SELL_SYMBOLS; everything else only alerts.
+API_CAN_SELL_CNC = True
+LIVE_SELL_SYMBOLS = {x.strip().upper() for x in os.getenv("GROWW_HOLDINGS_LIVE_SYMBOLS", "MILKYMIST,LALITHAA").split(",") if x.strip()}
 
 
 def stop_price(peak: float, avg: float) -> float:
@@ -62,8 +64,9 @@ def stop_price(peak: float, avg: float) -> float:
     return peak * (1 - pts)
 
 
-def live_sells_enabled() -> bool:
-    return API_CAN_SELL_CNC and os.getenv("GROWW_HOLDINGS_LIVE_SELLS", "").lower() == "true"
+def live_sells_enabled(sym: str | None = None) -> bool:
+    on = API_CAN_SELL_CNC and os.getenv("GROWW_HOLDINGS_LIVE_SELLS", "").lower() == "true"
+    return on and (sym is None or sym.upper() in LIVE_SELL_SYMBOLS)
 
 
 class HoldingsLogger(SwingLogger):
@@ -384,7 +387,7 @@ def check_once(g, state: dict[str, dict], logger: HoldingsLogger) -> bool:
         info = dict(symbol=sym, qty=h["qty"], ltp=ltp, stop=round(stop, 2), peak=st["peak"],
                     avg=h["avg"], gain_pct=gain_pct, source=source)
         st["sell_price"] = ltp
-        if not live_sells_enabled():
+        if not live_sells_enabled(sym):
             if not st["alerted"]:
                 logger.event("holding_stop_hit", **info)
                 st["alerted"] = True
@@ -411,7 +414,8 @@ def run_guardian(poll_interval: int = POLL_INTERVAL_SECONDS) -> None:
     logger = HoldingsLogger(LOG_DIR / f"groww_holdings_{_now().date().isoformat()}.jsonl",
                             notifier=notify if (telegram_notify.enabled() or ntfy_notify.enabled()) else None)
     state = load_state()
-    mode = "LIVE SELLS" if live_sells_enabled() else "ALERT-ONLY (no orders)"
+    live = sorted(x for x in WATCH_SYMBOLS if live_sells_enabled(x))
+    mode = f"LIVE SELLS for {live}; others alert-only" if live else "ALERT-ONLY (no orders)"
     logger.event("start", mode=mode, trail_pct=TRAIL_PCT, tight_arm=TIGHT_ARM, tight_trail=TIGHT_TRAIL,
                  trail_mode=TRAIL_MODE, symbols=sorted(WATCH_SYMBOLS), tracked=list(state))
     failures, login_date = 0, _now().date()

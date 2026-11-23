@@ -10,7 +10,7 @@ from src import groww_client, groww_holdings_guard as m
 if "--list" in sys.argv:
     g = groww_client.get_groww()
     h = m.fetch_free_holdings(g)
-    print(f"Trail {m.TRAIL_PCT * 100:g}% ({m.TRAIL_MODE}) | live sells: {m.live_sells_enabled()}")
+    print(f"Trail {m.TRAIL_PCT * 100:g}% ({m.TRAIL_MODE}) | live sells: {sorted(x for x in m.WATCH_SYMBOLS if m.live_sells_enabled(x)) or "none"}")
     if not h:
         print("Nothing guardable (no free quantity), or the fetch failed.")
     for sym, v in (h or {}).items():
