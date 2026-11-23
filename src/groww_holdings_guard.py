@@ -119,7 +119,7 @@ def notify(text: str, title: str = "Holdings guard", priority: str = "default", 
     try:
         if telegram_notify.enabled():
             icon = "\U0001F6A8 " if priority in {"urgent", "high"} else ""
-            telegram_notify.send_message(f"{icon}{title}\n{text}")
+            telegram_notify.send_message(f"{icon}[Groww] {title}\n{text}")
     except Exception as exc:  # noqa: BLE001
         print(f"WARNING: telegram push failed: {exc!r}")
     ntfy_notify.send(text, title=title, priority=priority, tags=tags)
