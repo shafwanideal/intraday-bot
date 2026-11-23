@@ -134,18 +134,45 @@ TRAIL_PCT = 0.005
 # even if price gaps slightly past the trigger before the resting order posts.
 GTT_FILL_BUFFER_PCT = 0.003
 
-# NSE requires every order/trigger price to be a multiple of this (confirmed
-# for real 2026-11-23 -- Kite rejected a live GTT with "Target trigger price
-# should be a multiple of tick size 0.05"/"Stoploss limit price should be a
-# multiple of tick size 0.05"). Every price this module computes (breakeven-
-# based SL/T1/T2, trailing floors, the placeholder target) is an arbitrary
-# float, so EVERY price handed to Kite must be snapped to this grid -- see
-# _round_to_tick, applied once, centrally, inside _place_oco_gtt.
+# Fallback ONLY -- the real per-instrument tick size (see _get_tick_size)
+# must be used whenever it's available. NSE requires every order/trigger
+# price to be a multiple of the INSTRUMENT'S OWN tick size, which is NOT
+# universal: confirmed for real 2026-11-23 that most stocks use 0.05, but
+# APOLLOHOSP (a high-priced stock) rejected a GTT with "...multiple of tick
+# size 0.50" -- a flat 0.05 assumption is simply wrong for some symbols.
 TICK_SIZE = 0.05
 
+# {tradingsymbol: tick_size}, populated once (the whole NSE instrument dump
+# comes back in one call anyway, so there's no reason to fetch it per
+# symbol) and kept for the life of the process -- tick size essentially
+# never changes intraday.
+_INSTRUMENT_TICK_CACHE: dict[str, float] = {}
 
-def _round_to_tick(price: float) -> float:
-    return round(round(price / TICK_SIZE) * TICK_SIZE, 2)
+
+def _get_tick_size(kite, symbol: str) -> float:
+    """This instrument's REAL tick size from Kite's own instrument master,
+    not a guessed constant. Falls back to TICK_SIZE (0.05, correct for most
+    stocks but not all) only if the fetch fails or the symbol genuinely
+    isn't found -- better than crashing, but logged nowhere, so a repeat
+    failure for the same odd-ticked symbol would keep silently using the
+    common-case default. Acceptable: 0.05 is still right most of the time,
+    and the alternative (refusing to place any GTT without a confirmed
+    tick size) would leave a real position completely unprotected."""
+    if symbol in _INSTRUMENT_TICK_CACHE:
+        return _INSTRUMENT_TICK_CACHE[symbol]
+    try:
+        for inst in kite.instruments("NSE"):
+            sym = inst.get("tradingsymbol")
+            tick = inst.get("tick_size")
+            if sym and tick:
+                _INSTRUMENT_TICK_CACHE[sym] = float(tick)
+    except PLACEMENT_EXCEPTIONS + (KeyError, TypeError, ValueError):
+        pass
+    return _INSTRUMENT_TICK_CACHE.get(symbol, TICK_SIZE)
+
+
+def _round_to_tick(price: float, tick: float = TICK_SIZE) -> float:
+    return round(round(price / tick) * tick, 2)
 
 PHASE_AWAITING_POSITION = "awaiting_position"
 PHASE_AWAITING_EXIT_SETUP = "awaiting_exit_setup"
@@ -505,10 +532,11 @@ def _advance_awaiting_position(kite, symbol: str, st: dict, logger: PdfEntryLogg
 
 
 def _place_oco_gtt(kite, symbol: str, qty: int, sl: float, target: float, ltp: float):
-    sl = _round_to_tick(sl)
-    target = _round_to_tick(target)
-    sl_price = _round_to_tick(sl * (1 - GTT_FILL_BUFFER_PCT))
-    target_price = _round_to_tick(target * (1 - GTT_FILL_BUFFER_PCT))
+    tick = _get_tick_size(kite, symbol)
+    sl = _round_to_tick(sl, tick)
+    target = _round_to_tick(target, tick)
+    sl_price = _round_to_tick(sl * (1 - GTT_FILL_BUFFER_PCT), tick)
+    target_price = _round_to_tick(target * (1 - GTT_FILL_BUFFER_PCT), tick)
     resp = kite.place_gtt(
         trigger_type=kite.GTT_TYPE_OCO,
         tradingsymbol=symbol,
